@@ -13,3 +13,7 @@ npx skills update -g                                             # 更新
 | skill | 内容 |
 | --- | --- |
 | [orca-account-failover](skills/orca-account-failover/SKILL.md) | Orca の端末で動く Claude Code セッションが利用上限で止まったとき、別の Claude アカウントへ切り替えて同じ端末で自動再開する hook。インストール後に `setup.sh` で hook を登録する |
+
+## ライセンス
+
+[MIT](LICENSE)

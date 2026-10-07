@@ -1,6 +1,7 @@
 ---
 name: orca-account-failover
 description: Orca の端末で動く Claude Code セッションが利用上限（usage limit）で止まったとき、Orca に登録した別の Claude アカウントへ切り替えて同じ端末で自動再開する hook。導入・解除・一時停止・状態確認・ログ調査に使う。トリガー - 「orca-account-failover を入れて／外して／止めて」「上限で止まったセッションを自動で再開したい」「【自動再開】というメッセージの出どころは」「failover のログを見て」など。
+license: MIT
 ---
 
 # orca-account-failover
