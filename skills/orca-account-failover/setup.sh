@@ -3,7 +3,10 @@
 # 何度実行しても同じ結果になる。スキルの置き場所が変わった後に実行し直すと、登録先のパスが付け替わる。
 set -euo pipefail
 
-dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# 登録するのは、このスクリプトを呼び出したときのパス（シンボリックリンクを解決しない）。
+# npx skills は更新時に実体の置き場所を変えることがあり（~/.claude/skills/ 直下のコピー →
+# ~/.agents/skills/ の実体 + シンボリックリンク）、Claude Code から見えるパスのほうが変わらない
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/settings.sh
 source "$dir/lib/settings.sh"
 

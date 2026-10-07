@@ -34,8 +34,13 @@ orca account list          # Claude アカウントが 2 つ以上あること�
 bash <skill>/setup.sh      # ~/.claude/settings.json の hooks.StopFailure（matcher: rate_limit）に登録する
 ```
 
-`setup.sh` は何度実行しても同じ結果になる。スキルの置き場所が変わった後に実行し直すと、登録先のパスが付け替わる。
-書き換える前の `settings.json` は、同じ場所の `settings.json.orca-account-failover.bak` に残る。
+`setup.sh` は何度実行しても同じ結果になる。書き換える前の `settings.json` は、同じ場所の
+`settings.json.orca-account-failover.bak` に残る。
+
+登録されるのは、`setup.sh` を呼び出したときのパスである。**Claude Code から見えるパス
+（`~/.claude/skills/orca-account-failover/setup.sh`）で実行する。** `npx skills` は更新時に実体の置き場所を
+変えることがあるが（`~/.claude/skills/` 直下のコピー → `~/.agents/skills/` の実体 + シンボリックリンク）、
+このパスは変わらないので、更新のたびに登録し直す必要は無い。
 
 新しく起動するセッションから有効になる。
 

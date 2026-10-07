@@ -3,7 +3,7 @@
 # スキルを削除する前に実行する（削除だけだと、無くなったスクリプトを指す登録が残る）。
 set -euo pipefail
 
-dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/settings.sh
 source "$dir/lib/settings.sh"
 
