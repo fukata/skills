@@ -22,6 +22,14 @@ case "$dir" in
 esac
 
 command="bash '$dir/hook.sh'"
+case "$command" in
+  *"$FAILOVER_HOOK_MARKER"*) ;;
+  *)
+    # 解除や付け替えでは、登録をこの目印で見分ける。目印を含まないパスで登録すると取り除けなくなる
+    echo "スキルのディレクトリ名が orca-account-failover ではないため登録できません: $dir" >&2
+    exit 1
+    ;;
+esac
 # shellcheck disable=SC2016
 rewrite_settings '
   .hooks.StopFailure =

@@ -79,13 +79,21 @@ bash "$skill_dir/teardown.sh" >/dev/null
 check 'hooks が無い設定は解除で変わらない' "$(query '.')" '{"model":"opus"}'
 
 # 6. シンボリックリンク経由で呼ぶと、リンク側のパスを登録する（実体のパスへ解決しない）
-ln -s "$skill_dir" "$work/linked-skill"
+mkdir "$work/linked"
+ln -s "$skill_dir" "$work/linked/orca-account-failover"
 printf '{}\n' >"$settings"
-bash "$work/linked-skill/setup.sh" >/dev/null
+bash "$work/linked/orca-account-failover/setup.sh" >/dev/null
 check 'リンク経由ならリンク側のパスを登録する' "$(query '.hooks.StopFailure[0].hooks[0].command')" \
-  "\"bash '$work/linked-skill/hook.sh'\""
+  "\"bash '$work/linked/orca-account-failover/hook.sh'\""
 bash "$skill_dir/setup.sh" >/dev/null
 check '呼び出すパスを変えると付け替わる' "$(query '[.hooks.StopFailure[].hooks[].command]')" "[\"$expected_command\"]"
+
+# 別名のディレクトリからは登録しない（解除のときに自分の登録を見分けられなくなる）
+ln -s "$skill_dir" "$work/renamed-skill"
+cp "$settings" "$work/before-renamed.json"
+if bash "$work/renamed-skill/setup.sh" >/dev/null 2>&1; then status=succeeded; else status=failed; fi
+check '別名のディレクトリからの登録は失敗する' "$status" 'failed'
+check '別名のディレクトリからは書き換えない' "$(cmp -s "$settings" "$work/before-renamed.json" && echo same || echo changed)" 'same'
 
 # 7. 壊れた settings.json は書き換えずに失敗する
 printf '{ broken\n' >"$settings"
