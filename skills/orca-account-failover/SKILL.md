@@ -21,7 +21,7 @@ Claude Code の `StopFailure` hook として動く。Orca の端末で動く対�
 ## 前提
 
 - Linux（`/proc` と `setsid` を使う）
-- Orca デスクトップアプリが起動していて、Claude アカウントを 2 つ以上登録してある（`orca account list`）
+- Orca デスクトップアプリが起動していて、切替可能な Claude 認証先が 2 つ以上ある（`orca account list` の管理アカウントと、保存済みの System Default）
 - Claude Code のネイティブ版（プロセス名が `claude`）
 - `jq`（登録・解除のスクリプトが使う）
 
@@ -30,7 +30,7 @@ Orca 1.4.220 / Claude Code 2.1.292 で確認している。
 ## 導入
 
 ```bash
-orca account list          # Claude アカウントが 2 つ以上あること。足りなければ orca account add
+orca account list          # 管理アカウントの一覧（System Default はこの一覧に含まれない）
 bash <skill>/setup.sh      # ~/.claude/settings.json の hooks.StopFailure（matcher: rate_limit）に登録する
 ```
 
@@ -99,6 +99,22 @@ tail -n 1 ~/.local/state/orca-account-failover/failover.log
 **`ORCA_ACCOUNT_FAILOVER_DRY_RUN=1` を付けずに実行しないこと。** hook は自分の親をたどって `claude` を探すので、
 このコマンドを実行しているセッション自身が終了させられる。
 
+## System Default への復帰
+
+管理アカウントに加え、Orca が退避した System Default の認証情報も切替先に含める。
+同じメールアドレスでも組織が異なる Team 用・個人用は別候補として扱う。
+管理アカウントとメール・組織が両方一致する場合は重複させない。
+
+Linux の退避先は `${XDG_CONFIG_HOME:-$HOME/.config}/orca/claude-runtime-auth/system-default-auth.json`。
+Orca のデータディレクトリを変更している場合は、hook の環境変数
+`ORCA_ACCOUNT_FAILOVER_ORCA_USER_DATA_DIR` にそのディレクトリを指定する。
+退避ファイルがない・読めない・認証情報が不足している場合は候補に含めない。
+認証情報は読み取りだけに使い、内容をログへ記録しない。
+復帰には Orca の `accounts.selectClaude` に `accountId: null` を渡す。
+
+既存の `system-default` の上限期限と再開回数制限は引き続き適用する。
+更新後は次回の hook 発火から反映される。待機中セッションを直ちに起こす処理はない。
+
 ## 判定の考え方
 
 実装は `lib/decide.js`、その冒頭のコメントに理由を書いてある。要点だけ挙げる。
@@ -125,12 +141,12 @@ tail -n 1 ~/.local/state/orca-account-failover/failover.log
 - 上限で待機している他のセッションを、別のアカウントが解けた時点で起こす仕組みは無い。
   各セッションは、自分に表示された解除時刻に Claude Code の自動継続で動く。
 - 利用上限の検出は Claude Code のエラー文面（`You've hit your … limit`）に依存する。文面が変わると何もしなくなる。
-- 実際にアカウントを切り替える経路は、通しでの動作確認をしていない（2026-10-08 時点）。
-  切替なしの再開と、`accounts.selectClaude` の呼び出しそのものは確認済み。
+- 管理アカウント間の切替・再開は実行ログで確認済み。System Default への復帰は
+  Orca 1.4.220 の実装確認とモックによる RPC テストまでで、実アカウントでの通しの動作は未検証。
 
 ## テスト
 
 ```bash
-node --test <skill>/test/decide.test.js   # 判定ロジック
+node --test <skill>/test/*.test.js        # 判定・System Default の候補追加と切替 RPC
 bash <skill>/test/settings.test.sh        # 登録・解除（一時ディレクトリで実行し、実際の設定には触れない）
 ```

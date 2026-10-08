@@ -4,6 +4,8 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const { SYSTEM_DEFAULT_KEY } = require('./decide.js');
 const { spawnSync } = require('node:child_process');
 
 const CLI_TIMEOUT_MS = 30_000;
@@ -31,10 +33,31 @@ function createClient() {
   return new RuntimeClient();
 }
 
+function readSystemDefault(snapshotPath) {
+  try {
+    const snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
+    const credentials = JSON.parse(snapshot.credentialsJson);
+    const identity = snapshot.configOauthAccount;
+    if (!credentials?.claudeAiOauth?.accessToken || !identity?.organizationUuid || !identity?.emailAddress) {
+      return null;
+    }
+    return { email: identity.emailAddress, organizationUuid: identity.organizationUuid };
+  } catch {
+    // 未保存・破損・認証情報なしの場合は復帰先にしない。認証情報をログへ出さない。
+    return null;
+  }
+}
+
+function systemDefaultSnapshotPath() {
+  const userData = process.env.ORCA_ACCOUNT_FAILOVER_ORCA_USER_DATA_DIR
+    || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'orca');
+  return path.join(userData, 'claude-runtime-auth', 'system-default-auth.json');
+}
+
 /**
  * @returns {Promise<{accountIds: string[], activeId: string|null, emails: Object<string, string>}>}
  */
-async function listClaudeAccounts(client) {
+async function listClaudeAccounts(client, { snapshotPath = systemDefaultSnapshotPath() } = {}) {
   // refreshUsage: false — 使用量は判定に使わない。取得側がレート制限に掛かっていると待たされるだけになる
   const { result } = await client.call('accounts.list', { refreshUsage: false });
   const claude = result?.claude;
@@ -43,10 +66,19 @@ async function listClaudeAccounts(client) {
   }
   // 返ってくる順は updatedAt の降順で、再認証のたびに入れ替わる。回す順を固定するため登録順に並べる
   const accounts = [...claude.accounts].sort((a, b) => a.createdAt - b.createdAt);
+  const systemDefault = readSystemDefault(snapshotPath);
+  const accountIds = accounts.map((account) => account.id);
+  const emails = Object.fromEntries(accounts.map((account) => [account.id, account.email]));
+  // 同じメールでも Team と個人の組織が異なれば別の利用枠。組織まで一致するときだけ重複を除く。
+  if (systemDefault && !accounts.some((account) =>
+    account.email === systemDefault.email && account.organizationUuid === systemDefault.organizationUuid)) {
+    accountIds.push(SYSTEM_DEFAULT_KEY);
+    emails[SYSTEM_DEFAULT_KEY] = `${systemDefault.email} (system default)`;
+  }
   return {
-    accountIds: accounts.map((account) => account.id),
+    accountIds,
     activeId: claude.activeAccountId ?? null,
-    emails: Object.fromEntries(accounts.map((account) => [account.id, account.email]))
+    emails
   };
 }
 
@@ -56,10 +88,11 @@ async function listClaudeAccounts(client) {
  * Orca の更新で名前や引数が変わると、ここが失敗する。
  */
 async function selectClaudeAccount(client, accountId) {
-  await client.call('accounts.selectClaude', { accountId });
+  const selectedId = accountId === SYSTEM_DEFAULT_KEY ? null : accountId;
+  await client.call('accounts.selectClaude', { accountId: selectedId });
   // 戻り値の形に頼らず、一覧を取り直して切り替わったことを確かめる
   const { activeId } = await listClaudeAccounts(client);
-  if (activeId !== accountId) {
+  if (activeId !== selectedId) {
     throw new Error(`accounts.selectClaude did not take effect (active=${activeId}, expected=${accountId})`);
   }
 }

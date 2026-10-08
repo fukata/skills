@@ -18,7 +18,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { parseLimitMessage, limitUntil, carryOverArgs, isPrintMode, decide } = require('./lib/decide.js');
+const { SYSTEM_DEFAULT_KEY, parseLimitMessage, limitUntil, carryOverArgs, isPrintMode, decide } = require('./lib/decide.js');
 const { createClient, listClaudeAccounts, selectClaudeAccount, runOrcaCli } = require('./lib/orca.js');
 
 const STATE_DIR = process.env.ORCA_ACCOUNT_FAILOVER_STATE_DIR;
@@ -324,7 +324,7 @@ async function main() {
         limit: limit.kind,
         limitUntil: new Date(until.at).toISOString(),
         resetParsed: until.parsed,
-        active: accounts.emails[accounts.activeId] ?? 'system default',
+        active: accounts.emails[accounts.activeId ?? SYSTEM_DEFAULT_KEY] ?? 'system default',
         target: decided.target ? accounts.emails[decided.target] : undefined
       });
       if (DRY_RUN) {

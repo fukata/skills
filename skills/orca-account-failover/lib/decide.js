@@ -182,7 +182,7 @@ function isLimited(state, key, now) {
 
 // 呼び出すのはアクティブが上限中と分かった後なので、アクティブ自身は候補から外れる
 function nextAvailableAccount(accountIds, activeId, state, now) {
-  const start = accountIds.indexOf(activeId) + 1;
+  const start = accountIds.indexOf(activeId ?? SYSTEM_DEFAULT_KEY) + 1;
   const rotated = [...accountIds.slice(start), ...accountIds.slice(0, start)];
   return rotated.find((id) => !isLimited(state, id, now)) ?? null;
 }
@@ -208,7 +208,7 @@ function recordResume(state, sessionId, now) {
  *
  * @param {object} input
  * @param {number} input.now
- * @param {string[]} input.accountIds 切替候補の管理アカウント。この順に回す
+ * @param {string[]} input.accountIds 切替候補（復帰可能なら SYSTEM_DEFAULT_KEY も含む）。この順に回す
  * @param {string|null} input.activeId アクティブな管理アカウント。null は system default
  * @param {object} input.state 前回までの記録（書き換えない）
  * @param {string} input.sessionId
