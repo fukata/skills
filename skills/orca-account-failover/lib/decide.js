@@ -1,5 +1,5 @@
 'use strict';
-// 判定ロジック。Orca にも端末にもファイルにも触らないので、素の node でテストできる（test/decide.test.js）。
+// 判定ロジック。Orca にも端末にもファイルにも触らないので、素の node でテストできる（tests/decide.test.js）。
 
 // Orca で管理アカウントを選んでいない状態（エージェント自身のログインを使う）を表すキー
 const SYSTEM_DEFAULT_KEY = 'system-default';

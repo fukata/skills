@@ -7,11 +7,10 @@ set -euo pipefail
 # npx skills は更新時に実体の置き場所を変えることがあり（~/.claude/skills/ 直下のコピー →
 # ~/.agents/skills/ の実体 + シンボリックリンク）、Claude Code から見えるパスのほうが変わらない
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/settings.sh
-source "$dir/lib/settings.sh"
+settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "jq が必要です" >&2
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 が必要です" >&2
   exit 1
 fi
 case "$dir" in
@@ -23,23 +22,18 @@ esac
 
 command="bash '$dir/hook.sh'"
 case "$command" in
-  *"$FAILOVER_HOOK_MARKER"*) ;;
+  *"orca-account-failover/hook.sh"*) ;;
   *)
     # 解除や付け替えでは、登録をこの目印で見分ける。目印を含まないパスで登録すると取り除けなくなる
     echo "スキルのディレクトリ名が orca-account-failover ではないため登録できません: $dir" >&2
     exit 1
     ;;
 esac
-# shellcheck disable=SC2016
-rewrite_settings '
-  .hooks.StopFailure =
-    [{matcher: "rate_limit", hooks: [{type: "command", command: $command, timeout: 10}]}]
-    + ((.hooks.StopFailure // []) | without_failover)
-' --arg command "$command"
+result="$(python3 -I "$dir/lib/settings.py" add --file "$settings" --command "$command")"
 
-if [ "$settings_changed" = 1 ]; then
+if [ "$result" = changed ]; then
   echo "登録しました: $command"
-  echo "  $(settings_path)（変更前の内容は同じ場所の .orca-account-failover.bak）"
+  echo "  $settings（変更前の内容は同じ場所の .orca-account-failover.bak）"
 else
   echo "登録済みです: $command"
 fi
