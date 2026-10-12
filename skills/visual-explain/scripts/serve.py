@@ -68,7 +68,7 @@ CHECK_TIMEOUT = 600
 KILL_GRACE = 10               # 時間切れで SIGTERM を送ってから SIGKILL までの猶予（秒）
 ALL_INTERFACES = {"", "0.0.0.0", "::", "[::]"}
 # 親のエージェントのセッションから引き継がない環境変数（入れ子のセッションと誤認させない）
-PARENT_ENV = agents_mod.ClaudeAgent.parent_env
+PARENT_ENV = agents_mod.ClaudeAgent.parent_env + agents_mod.CodexAgent.parent_env
 MCP_LIST_TIMEOUT = agents_mod.MCP_LIST_TIMEOUT
 # 資料の HTML に付ける。質問欄（同じ配信元の qa.js）以外のスクリプトと、外部の資源を読み込ませない
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
@@ -529,6 +529,8 @@ class Config:
     bind: str = "127.0.0.1"
     repo: str = None             # 説明したリポジトリ。検査の --repo と、新しいセッションの作業ディレクトリに使う
     claude: list = None          # claude を起動するコマンド（引数の配列）
+    codex: list = None           # codex を起動するコマンド（引数の配列）
+    agent: str = "auto"          # 資料を作ったセッションが分からないときに答えるエージェント（auto は使える方、両方なら claude）
     token: str = None
     doc_name: str = "explanation.html"
     prompt: str = DEFAULT_PROMPT
@@ -537,6 +539,7 @@ class Config:
     answer_timeout: int = 900
     model: str = None
     claude_home: str = None      # 会話の記録を探す場所（既定は CLAUDE_CONFIG_DIR か ~/.claude）
+    codex_home: str = None       # Codex の会話の記録を探す場所（既定は CODEX_HOME か ~/.codex）
     qa: bool = True
     allow_host: list = field(default_factory=list)  # IP アドレス・localhost・このマシンの名前・*.ts.net 以外に許すホスト名
     local_only: bool = False     # 回答で Web と MCP を使わず、資料とリポジトリだけで答える
@@ -552,6 +555,8 @@ class Config:
         self.claude = list(self.claude or ["claude"])
         self.token = self.token or secrets.token_urlsafe(18)
         self.claude_home = self.claude_home or os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        self.codex = list(self.codex or ["codex"])
+        self.codex_home = self.codex_home or os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
         names = {"localhost", socket.gethostname(), socket.getfqdn(), self.bind.strip("[]")}
         names |= {n.split(".")[0] for n in list(names)} | set(self.allow_host or [])
         self.hosts = {n.lower().rstrip(".") for n in names if n}
@@ -624,9 +629,10 @@ def find_docs(cfg):
     return out
 
 
-def record_origin(material_dir, session_id, cwd):
+def record_origin(material_dir, session_id, cwd, agent="claude", config_dir=None):
     path = os.path.join(material_dir, QA_DIR, "origin.json")
-    write_json(path, {"session_id": session_id, "cwd": os.path.abspath(cwd), "recorded_at": now()})
+    write_json(path, {"session_id": session_id, "cwd": os.path.abspath(cwd), "agent": agent, "config_dir": config_dir,
+                      "recorded_at": now()})
     return path
 
 
@@ -1011,18 +1017,22 @@ class App:
         self.viewers = 0   # 受け箱か質問の資料をブラウザで開いている数（/__qa/events につないだままの接続）
         self.changes = 0   # AskUserQuestion の質問が増えた・締め切られた回数。受け箱に知らせる
         self.changed = threading.Condition()
-        self.agents = {"claude": agents_mod.ClaudeAgent(cfg.claude)}
-        self.qa_enabled, self.qa_reason = self.detect_claude()
+        self.agents = {"claude": agents_mod.ClaudeAgent(cfg.claude), "codex": agents_mod.CodexAgent(cfg.codex)}
+        self.homes = {"claude": cfg.claude_home, "codex": cfg.codex_home}  # 会話の記録を探す既定の場所
+        self.sandbox = None  # Codex のサンドボックスが動くか（配信の間、最初に答えるときに 1 回だけ確かめる）
+        self.sandbox_lock = threading.Lock()
+        self.qa_enabled, self.qa_reason = self.detect_agents()
         for rel in find_docs(cfg):
             self.owns(Material(cfg, rel))
 
     # ---- 起動と停止
 
-    def detect_claude(self):
+    def detect_agents(self):
         if not self.cfg.qa:
             return False, "質問の受付を無効にして配信している（--no-qa）"
-        if not self.agents["claude"].available():
-            return False, "資料を配信しているマシンに claude コマンドが見つからない（%s）" % self.cfg.claude[0]
+        if not any(a.available() for a in self.agents.values()):
+            return False, "資料を配信しているマシンに claude も codex も見つからない（%s、%s）" % (
+                self.cfg.claude[0], self.cfg.codex[0])
         return True, None
 
     def owns(self, m):
@@ -1464,11 +1474,30 @@ class App:
         except OSError:
             return ""
 
-    # ---- claude -p
+    # ---- エージェント（claude -p / codex exec）
+
+    def default_agent(self):
+        """資料を作ったセッションが分からないときに答えるエージェント。--agent のもの（使えなければもう一方）。"""
+        order = [self.cfg.agent] if self.cfg.agent in self.agents else []
+        order += [k for k in ("claude", "codex") if k not in order]
+        return next((self.agents[k] for k in order if self.agents[k].available()), self.agents[order[0]])
+
+    @staticmethod
+    def recorded_agent(m):
+        """資料に記録したエージェント（質問に答えているセッション、無ければ資料を作ったセッション）。記録が無ければ None。
+        エージェントを書いていない記録（zaicodev 版で作ったもの）は Claude Code。"""
+        s = read_json(m.session_path)
+        if isinstance(s, dict) and SESSION_ID_RE.match(str(s.get("session_id", ""))):
+            return s.get("agent") or "claude"
+        o = read_json(m.origin_path)
+        return (o.get("agent") or "claude") if isinstance(o, dict) else None
 
     def agent_for(self, m=None):
-        """その資料の質問に答えるエージェント。"""
-        return self.agents["claude"]
+        """その資料の質問に答えるエージェント。記録したエージェントが使えなければ、既定のエージェント。"""
+        key = self.recorded_agent(m) if m is not None else None
+        if key in self.agents and self.agents[key].available():
+            return self.agents[key]
+        return self.default_agent()
 
     @staticmethod
     def ask_origin(m):
@@ -1476,27 +1505,35 @@ class App:
         o = read_json(m.origin_path) or {}
         return o if o.get("ask") or o.get("repo") else None
 
-    def agent_env(self, m, agent):
-        """エージェントを動かす環境。AskUserQuestion の質問の資料では、質問したセッションのアカウント（設定フォルダ）で動かす
-        （その会話を分岐でき、使用量もそのアカウントにかかる）。配信サーバーを起動したセッションのアカウントは引き継がない。"""
-        o = self.ask_origin(m) if m else None
-        if o is None:
-            return agent.child_env(os.environ)
-        return agent.child_env(os.environ, o.get("config_dir"), keep_account=False)
+    @staticmethod
+    def origin_account(m, agent):
+        """資料を作ったセッションのアカウント（設定フォルダ）。そのエージェントの記録でなければ None。"""
+        o = (read_json(m.origin_path) or {}) if m else {}
+        if not isinstance(o, dict) or (o.get("agent") or "claude") != agent.key:
+            return None
+        cd = o.get("config_dir")
+        return cd if isinstance(cd, str) and os.path.isabs(cd) and os.path.isdir(cd) else None
 
-    def account_home(self, m):
-        o = self.ask_origin(m)
-        if o is None:
-            return self.cfg.claude_home
-        return o.get("config_dir") or os.path.expanduser("~/.claude")
+    def agent_env(self, m, agent):
+        """エージェントを動かす環境。資料を作ったセッションのアカウント（設定フォルダ）で動かす（その会話を分岐でき、
+        使用量もそのアカウントにかかる）。AskUserQuestion の質問の資料では、配信サーバーを起動したセッションのアカウントは
+        引き継がない。"""
+        o = self.ask_origin(m) if m else None
+        return agent.child_env(os.environ, self.origin_account(m, agent), keep_account=o is None)
+
+    def account_home(self, m, agent):
+        if self.ask_origin(m) is not None:
+            return self.origin_account(m, agent) or agent.default_home()
+        return self.origin_account(m, agent) or self.homes[agent.key]
 
     def session_plan(self, m, agent):
         s = read_json(m.session_path) or {}
-        if SESSION_ID_RE.match(str(s.get("session_id", ""))):
+        if SESSION_ID_RE.match(str(s.get("session_id", ""))) and (s.get("agent") or "claude") == agent.key:
             cwd = s.get("cwd") if os.path.isdir(str(s.get("cwd"))) else self.cfg.workdir
             return Plan("resume", s["session_id"], cwd, s.get("forked_from"))
         o = read_json(m.origin_path) or {}
-        if agent.session_exists(str(o.get("session_id", "")), self.account_home(m)):
+        if (o.get("agent") or "claude") == agent.key and agent.session_exists(str(o.get("session_id", "")),
+                                                                              self.account_home(m, agent)):
             cwd = o.get("cwd") if os.path.isdir(str(o.get("cwd"))) else self.cfg.workdir
             return Plan("fork", o["session_id"], cwd, o["session_id"])
         return self.new_plan(m, agent)
@@ -1524,7 +1561,7 @@ class App:
             sid = res.session_id or (plan.session_id if plan.mode != "fork" else None)
             if sid:
                 prev = read_json(m.session_path) or {}
-                write_json(m.session_path, {"session_id": sid, "cwd": plan.cwd,
+                write_json(m.session_path, {"session_id": sid, "cwd": plan.cwd, "agent": agent.key,
                                             "forked_from": plan.forked_from or prev.get("forked_from"),
                                             "created_at": prev.get("created_at") or now(), "updated_at": now()})
         return plan, res
@@ -1599,7 +1636,7 @@ class App:
             return []
         agent = self.agent_for(m)
         env = self.agent_env(m, agent)
-        key = (cwd, env.get(agent.account_env, "")) if m and self.ask_origin(m) else cwd
+        key = (agent.key, cwd, env.get(agent.account_env, ""))
         with self.lock:
             entry = self.mcp.get(key)
             first = entry is None
@@ -1626,6 +1663,7 @@ class App:
 
     def build_prompt(self, m, item, cwd=None):
         build = item.get("kind") == "build"
+        agent = self.agent_for(m)
         with open(BUILD_PROMPT if build else self.cfg.prompt, encoding="utf-8") as f:
             text = f.read()
         section = item.get("section") or {}
@@ -1641,6 +1679,10 @@ class App:
             "skill_path": SKILL_MD,
             "template_path": TEMPLATE,
             "external_sources": self.external_sources(cwd or self.cfg.workdir, m),
+            "agent_name": agent.label,
+            "write_hint": agent.write_hint,
+            # 資料作りでは、質問したセッションの質問のツール
+            "ask_tool": self.agents.get((read_json(m.origin_path) or {}).get("agent") or "claude", agent).ask_tool,
         }
         for key, value in values.items():
             text = text.replace("{{%s}}" % key, value)
@@ -1657,9 +1699,24 @@ class App:
                               check_argvs=checks, model=self.cfg.model, local_only=self.cfg.local_only,
                               mcp_names=[] if self.cfg.local_only else self.mcp_servers(plan.cwd, m))
 
+    def codex_sandbox(self, env):
+        """Codex のサンドボックスが動くか。配信の間、最初の 1 回だけ確かめる。"""
+        with self.sandbox_lock:
+            if self.sandbox is None:
+                self.sandbox = self.agents["codex"].sandbox_works(env)
+            return self.sandbox
+
     def exec_agent(self, m, item, prompt, plan, agent):
-        cmd = agent.command(self.agent_run(m, item, plan, agent))
         env = self.agent_env(m, agent)
+        run = self.agent_run(m, item, plan, agent)
+        if agent.key == "codex":
+            run.sandbox = self.codex_sandbox(env)
+            if not run.sandbox:
+                # サンドボックスが動かない。子の codex のコマンドと書き込み先をガードの hook で絞る（方針は qa/ に残す）
+                run.guard_policy = os.path.join(m.qa_dir, "guard-%s.json" % item["id"])
+                write_json(run.guard_policy, {"write_files": run.write_files, "write_dirs": run.write_dirs,
+                                              "commands": run.check_argvs})
+        cmd = agent.command(run)
         env[ASK_CHILD_ENV] = "1"
         job = self.job()
         with self.lock:
@@ -1799,6 +1856,11 @@ class App:
                 building = self.building_job(m, qid)
                 return ("回答を検査しています" if "--fragment" in cmd else
                         "作った資料を検査しています" if building else "直した本文を検査しています")
+            # Codex は読み取りもシェルで行う
+            if m.path in cmd or m.draft in cmd:
+                return "資料を読んでいます"
+            if m.answer_path(qid) in cmd:
+                return "回答を読み直しています"
             return "コマンドを実行しています: %s" % clip(cmd)
         if name in ("Task", "Agent"):
             return "調べものを手分けしています"
@@ -2096,7 +2158,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(200 if view else 404, view or {"error": "この資料には Claude Code からの質問が無い"})
         enabled, reason = self.app.qa_status(m)
         self.send_json(200, {"doc": m.rel, "rev": file_rev(m.path), "now": now(),
-                             "qa": {"enabled": enabled, "reason": reason}, "items": self.app.items(m),
+                             "qa": {"enabled": enabled, "reason": reason, "agent_name": self.app.agent_for(m).label},
+                             "items": self.app.items(m),
                              "ask": self.app.ask_view(m)})
 
     # ---- POST
@@ -2205,7 +2268,7 @@ def serve_main(args):
         print("配信フォルダが無い: %s" % args.dir, file=sys.stderr)
         return 2
     cfg = Config(root=args.dir, port=args.port, bind=args.bind, repo=args.repo, claude=shlex.split(args.claude),
-                 token=args.token, doc_name=args.doc_name, prompt=args.prompt, check_cmd=args.check_cmd,
+                 codex=shlex.split(args.codex), agent=args.agent, token=args.token, doc_name=args.doc_name, prompt=args.prompt, check_cmd=args.check_cmd,
                  browser_check=not args.no_browser_check, answer_timeout=args.answer_timeout, model=args.model,
                  qa=not args.no_qa, allow_host=args.allow_host, local_only=args.local_only, private=args.private,
                  workers=args.workers, prefs=os.path.join(ask_home(), VIEWER_PREFS))
@@ -2227,9 +2290,11 @@ def serve_main(args):
     for rel in find_docs(cfg):
         print("資料: %s/%s?k=%s" % (base, rel, cfg.token))
     if app.qa_enabled:
-        print("質問: 受け付ける（%s が答える。作業ディレクトリの既定: %s）" % (shlex.join(cfg.claude), cfg.workdir))
+        names = "、".join("%s（%s）" % (a.label, shlex.join(a.argv)) for a in app.agents.values() if a.available())
+        print("質問: 受け付ける（資料を作ったエージェントが答える。使えるもの: %s。資料を作ったセッションが分からないとき: %s。"
+              "作業ディレクトリの既定: %s）" % (names, app.default_agent().label, cfg.workdir))
         print("回答で使う外の情報源: %s" % ("無し（--local-only）" if cfg.local_only else
-                                          "Web と、claude に設定された MCP のサーバーすべて（--local-only で止める）"))
+                                          "Web と、エージェントに設定された MCP のサーバーすべて（--local-only で止める）"))
     else:
         print("質問: 受け付けない（%s）" % app.qa_reason)
     sys.stdout.flush()
@@ -2258,11 +2323,18 @@ def origin_main(args):
     if not os.path.isdir(args.material):
         print("資料フォルダが無い: %s" % args.material, file=sys.stderr)
         return 2
-    if not args.session_id:
-        print("CLAUDE_CODE_SESSION_ID が無いため、資料を作ったセッションを記録しなかった。"
+    # どのエージェントのセッションかは、そのエージェントがコマンドに渡す環境変数で分かる
+    agent, sid = args.agent, args.session_id
+    if not agent:
+        detected, env_sid = agents_mod.detect_session_agent(os.environ)
+        agent, sid = detected or "claude", sid or env_sid
+    cls = agents_mod.AGENTS[agent]
+    sid = sid or os.environ.get(cls.session_env)
+    if not sid:
+        print("CLAUDE_CODE_SESSION_ID も CODEX_THREAD_ID も無いため、資料を作ったセッションを記録しなかった。"
               "ページからの質問には新しいセッションで答える。", file=sys.stderr)
         return 0
-    path = record_origin(args.material, args.session_id, args.cwd)
+    path = record_origin(args.material, sid, args.cwd, agent, os.environ.get(cls.account_env) or None)
     print("資料を作ったセッションを記録した: %s" % path)
     return 0
 
@@ -2405,7 +2477,10 @@ def main(argv=None):
     s.add_argument("--max-time", type=parse_duration, default=parse_duration("2h"), help="この時間で自動停止（既定 2h、0 は上限なし）")
     s.add_argument("--answer-timeout", type=parse_duration, default=parse_duration("15m"), help="1 件の回答の上限（既定 15m）")
     s.add_argument("--claude", default=os.environ.get("VISUAL_EXPLAIN_CLAUDE", "claude"), help="claude を起動するコマンド")
-    s.add_argument("--model", help="回答に使うモデル（既定は claude の既定）")
+    s.add_argument("--codex", default=os.environ.get("VISUAL_EXPLAIN_CODEX", "codex"), help="codex を起動するコマンド")
+    s.add_argument("--agent", choices=("auto", "claude", "codex"), default="auto",
+                   help="資料を作ったセッションが分からないときに答えるエージェント（既定 auto: 使える方、両方なら claude）")
+    s.add_argument("--model", help="回答に使うモデル（既定はエージェントの既定）")
     s.add_argument("--doc-name", default="explanation.html", help="質問欄を差し込む HTML のファイル名")
     s.add_argument("--prompt", default=DEFAULT_PROMPT, help="claude に渡す指示文の雛形")
     s.add_argument("--check-cmd", help="本文を直した後の検査コマンド（{file} が作業用コピー）。空文字なら検査しない")
@@ -2421,7 +2496,8 @@ def main(argv=None):
     o = sub.add_parser("origin", help="資料を作ったセッションを記録する（ページからの質問でその文脈を使い回す）")
     o.add_argument("material", help="資料のフォルダ（explanation.html がある所）")
     o.add_argument("--cwd", default=os.getcwd(), help="資料を作ったセッションの作業ディレクトリ")
-    o.add_argument("--session-id", default=os.environ.get("CLAUDE_CODE_SESSION_ID"), help="既定は環境変数 CLAUDE_CODE_SESSION_ID")
+    o.add_argument("--agent", choices=sorted(agents_mod.AGENTS), help="資料を作ったエージェント（既定は環境変数から判定）")
+    o.add_argument("--session-id", help="既定は環境変数 CLAUDE_CODE_SESSION_ID（Codex は CODEX_THREAD_ID）")
     e = sub.add_parser("export", help="回答した質問を、資料の末尾の節に書き出す（ファイルを渡しても読めるように）")
     e.add_argument("material", help="資料のフォルダ、または資料の HTML")
     e.add_argument("--doc-name", default="explanation.html", help="資料の HTML のファイル名（フォルダを渡したとき）")

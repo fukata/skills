@@ -12,6 +12,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import uuid
 from dataclasses import dataclass, field
@@ -27,6 +28,10 @@ HELPER_TOOLS = ["Task", "Agent", "Skill", "LSP"]
 EXTERNAL_TOOLS = ["WebSearch", "WebFetch", "ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool"]
 # claude mcp list の行（「名前: 接続先 - 状態」）。名前に「:」を含むもの（plugin:slack:slack）もある
 MCP_LINE_RE = re.compile(r"^(\S.*?): \S.* - \S")
+# サンドボックスが動かないときに codex exec を絞る hook
+GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codex_guard.py")
+# codex の -c に dotted key のまま書ける名前（MCP サーバーの名前）
+SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def inside(path, root):
@@ -221,7 +226,180 @@ class ClaudeAgent(Agent):
         return ClaudeReader()
 
 
-AGENTS = {"claude": ClaudeAgent}
+def toml_str(value):
+    """codex の -c の値に書く TOML の文字列（JSON の文字列は TOML の basic string として読める）。"""
+    return json.dumps(value, ensure_ascii=False)
+
+
+class CodexReader:
+    """codex exec --json の出力を 1 行ずつ読む。シェル・ファイルの変更・Web 検索・MCP を、Claude と同じ
+    「ツール名と入力」の形に直して途中経過にする（途中経過の文は serve.py が Claude と共通で作る）。"""
+
+    def __init__(self):
+        self.thread, self.text, self.done, self.failure, self.seen = None, None, False, None, set()
+
+    def feed(self, line):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            return []
+        if not isinstance(ev, dict):
+            return []
+        kind = ev.get("type")
+        if kind == "thread.started":
+            self.thread = ev.get("thread_id")
+        elif kind == "turn.completed":
+            self.done = True
+        elif kind in ("turn.failed", "error"):
+            err = ev.get("error") if kind == "turn.failed" else ev
+            self.failure = str((err if isinstance(err, dict) else {}).get("message") or kind)
+        if kind not in ("item.started", "item.completed"):
+            return []
+        it = ev.get("item") if isinstance(ev.get("item"), dict) else {}
+        if it.get("type") == "agent_message" and kind == "item.completed":
+            self.text = str(it.get("text") or "")
+        if it.get("id") in self.seen:
+            return []
+        steps = self.steps(it)
+        if steps:
+            self.seen.add(it.get("id"))
+        return steps
+
+    @staticmethod
+    def steps(it):
+        t = it.get("type")
+        if t == "command_execution":
+            return [("Bash", {"command": str(it.get("command") or "")})]
+        if t == "file_change":
+            return [("Edit", {"file_path": str(c.get("path") or "")}) for c in it.get("changes") or [] if isinstance(c, dict)]
+        if t == "web_search":
+            return [("WebSearch", {"query": str(it.get("query") or "")})]
+        if t == "mcp_tool_call":
+            return [("mcp__%s__%s" % (it.get("server"), it.get("tool")), {})]
+        return []
+
+    def result(self, returncode, stderr, raw):
+        """(成功したか, 最後の応答, セッションの ID, 失敗の文)"""
+        if returncode != 0 or self.failure or not self.done:
+            detail = self.failure or stderr.strip()[-800:] or raw.strip()[-800:] or "終了コード %d" % returncode
+            return False, "", None, "codex が失敗した: %s" % detail
+        return True, self.text or "", self.thread, None
+
+
+class CodexAgent(Agent):
+    key, label = "codex", "Codex"
+    session_env, account_env, home_dir = "CODEX_THREAD_ID", "CODEX_HOME", "~/.codex"
+    ask_tool, write_hint = "request_user_input", "apply_patch"
+    # 親の Codex セッションから引き継がない環境変数（子は自分のセッションの ID を受け取る）
+    parent_env = ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
+
+    def rollout(self, session_id, home):
+        """会話の記録のファイル（sessions/YYYY/MM/DD/rollout-<時刻>-<ID>.jsonl）。"""
+        if not SESSION_ID_RE.match(session_id or ""):
+            return None
+        found = glob.glob(os.path.join(home, "sessions", "*", "*", "*", "rollout-*-%s.jsonl" % session_id))
+        return found[0] if found else None
+
+    def thread_row(self, session_id, home):
+        """state_5.sqlite の threads の行（最初の依頼）。無ければ None。"""
+        path = os.path.join(home, "state_5.sqlite")
+        if not SESSION_ID_RE.match(session_id or "") or not os.path.isfile(path):
+            return None
+        try:
+            db = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2)
+            try:
+                return db.execute("select first_user_message from threads where id = ?", (session_id,)).fetchone()
+            finally:
+                db.close()
+        except sqlite3.Error:
+            return None
+
+    def session_exists(self, session_id, home):
+        return bool(self.thread_row(session_id, home) or self.rollout(session_id, home))
+
+    def session_info(self, session_id, home, transcript_path=None):
+        home = home or self.home()
+        row = self.thread_row(session_id, home)
+        text = row[0] if row and row[0] else self.rollout_prompt(self.rollout(session_id, home) or transcript_path)
+        text = re.sub(r"\s+", " ", text or "").strip()
+        return {"prompt": (text[:120] + ("…" if len(text) > 120 else "")) if text else None}
+
+    @staticmethod
+    def rollout_prompt(path, lines=2000):
+        if not isinstance(path, str) or not os.path.isfile(path):
+            return None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for _, line in zip(range(lines), f):
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    p = ev.get("payload") if isinstance(ev, dict) and ev.get("type") == "event_msg" else None
+                    it = p.get("item") if isinstance(p, dict) and p.get("type") == "item_completed" else None
+                    if isinstance(it, dict) and it.get("type") == "UserMessage":
+                        return " ".join(c.get("text", "") for c in it.get("content") or [] if isinstance(c, dict))
+        except OSError:
+            return None
+        return None
+
+    def list_mcp(self, cwd, env, timeout=MCP_LIST_TIMEOUT):
+        """codex に設定された、有効な MCP サーバーの名前。調べられなければ None。-c の dotted key に書けない名前は
+        扱わない（そのサーバーは利用者の設定のまま動く）。"""
+        out = run_listing(self.argv + ["mcp", "list", "--json"], cwd, env, timeout)
+        try:
+            servers = json.loads(out) if out is not None else None
+        except ValueError:
+            return None
+        if not isinstance(servers, list):
+            return None
+        return [s["name"] for s in servers
+                if isinstance(s, dict) and s.get("enabled") and SAFE_KEY_RE.match(str(s.get("name")))]
+
+    def external_label(self, mcp_names):
+        return "Web の検索（web_search）、MCP のサーバー（%s）" % ("、".join(mcp_names) if mcp_names else "無し")
+
+    def sandbox_works(self, env):
+        """このマシンで Codex のサンドボックスが動くか（AppArmor が bwrap を止める環境では動かない）。"""
+        try:
+            r = subprocess.run(self.argv + ["sandbox", "--", "true"], env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return r.returncode == 0
+
+    def command(self, run):
+        cmd = self.argv + ["exec", "--json", "--skip-git-repo-check"]
+        if run.model:
+            cmd += ["-m", run.model]
+        cmd += ["-c", "web_search=%s" % toml_str("disabled" if run.local_only else "live")]
+        for name in run.mcp_names:
+            cmd += (["-c", "mcp_servers.%s.enabled=false" % name] if run.local_only else
+                    ["-c", "mcp_servers.%s.default_tools_approval_mode=%s" % (name, toml_str("approve"))])
+        if run.sandbox:
+            # 読み取り専用を基にし、資料フォルダ（作業用コピー・回答・images/）だけ書けるようにする
+            cmd += ["-c", "permissions.visual_explain.extends=%s" % toml_str(":read-only"),
+                    "-c", "permissions.visual_explain.filesystem={%s = %s}" % (toml_str(run.material_dir), toml_str("write")),
+                    "-c", "default_permissions=%s" % toml_str("visual_explain")]
+        else:
+            # サンドボックスが動かない。子の codex だけに付けるガードの hook で、コマンドと書き込み先を絞る
+            # （-c で付けた hook は信頼されていないので、信頼の確認を飛ばす）
+            guard = "python3 -I %s --policy %s" % (shlex.quote(GUARD), shlex.quote(run.guard_policy))
+            cmd += ["-s", "danger-full-access", "--dangerously-bypass-hook-trust", "-c",
+                    'hooks.PreToolUse=[{matcher = "Bash|apply_patch", hooks = [{type = "command", command = %s, '
+                    'timeout = 30}]}]' % toml_str(guard)]
+        if run.mode in ("fork", "resume"):
+            cmd += [run.mode, run.session_id]
+        return cmd + ["-"]  # 指示文は標準入力から読ませる
+
+    def new_session_id(self):
+        return None  # codex exec が作る（thread.started で受け取る）
+
+    def reader(self):
+        return CodexReader()
+
+
+AGENTS = {"claude": ClaudeAgent, "codex": CodexAgent}
 
 
 def detect_session_agent(env):

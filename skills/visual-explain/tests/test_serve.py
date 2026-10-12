@@ -22,6 +22,7 @@ import urllib.parse
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(HERE, "..", "scripts")
 FAKE = os.path.join(HERE, "fixtures", "fake_claude.py")
+FAKE_CODEX = os.path.join(HERE, "fixtures", "fake_codex.py")
 DOC = "topic/explanation.html"
 TOKEN = "t0ken-for-test"
 
@@ -46,6 +47,7 @@ class ServeTestBase(unittest.TestCase):
         self.repo = os.path.join(self.tmp, "repo")
         shutil.copytree(os.path.join(HERE, "fixtures", "repo"), self.repo)
         self.claude_home = os.path.join(self.tmp, "claude-home")
+        self.codex_home = os.path.join(self.tmp, "codex-home")
         self.log = os.path.join(self.tmp, "fake.jsonl")
         os.environ["FAKE_CLAUDE_LOG"] = self.log
         self.mcp_log = os.path.join(self.tmp, "mcp.log")
@@ -64,8 +66,8 @@ class ServeTestBase(unittest.TestCase):
 
     def start(self, **kw):
         opts = dict(root=self.root, bind="127.0.0.1", port=0, repo=self.repo,
-                    claude=[sys.executable, FAKE], token=TOKEN, browser_check=False,
-                    answer_timeout=10, claude_home=self.claude_home)
+                    claude=[sys.executable, FAKE], codex=[sys.executable, FAKE_CODEX], token=TOKEN, browser_check=False,
+                    answer_timeout=10, claude_home=self.claude_home, codex_home=self.codex_home)
         opts.update(kw)
         self.app = serve.App(serve.Config(**opts))
         self.httpd = serve.make_server(self.app)
@@ -437,13 +439,14 @@ class AnswerTest(ServeTestBase):
         self.start()
         self.assertTrue(self.app.wait_idle(5))
         self.app.agents["claude"].argv = [os.path.join(self.tmp, "no-such-claude")]
+        self.app.agents["codex"].argv = [os.path.join(self.tmp, "no-such-codex")]
         other = os.path.join(self.tmp, "other")
         os.makedirs(other)
         self.assertEqual(self.app.mcp_servers(other), [])
-        self.assertNotIn(other, self.app.mcp)  # 失敗は覚えない
+        self.assertFalse([k for k in self.app.mcp if k[1] == other])  # 失敗は覚えない
         self.app.agents["claude"].argv = [sys.executable, FAKE]
         self.assertEqual(self.app.mcp_servers(other), ["claude_ai_Gmail", "plugin_slack_slack", "metrics"])
-        self.assertIn(other, self.app.mcp)
+        self.assertTrue([k for k in self.app.mcp if k[1] == other])
 
 
 class ProgressTest(ServeTestBase):
@@ -486,6 +489,9 @@ class ProgressTest(ServeTestBase):
         self.assertEqual(label("mcp__claude_ai_Google_Drive__search_files"), "MCP（Google Drive）を使っています: search_files")
         self.assertEqual(label("Skill", skill="review"), "スキルを読んでいます: review")
         self.assertEqual(label("Grep", pattern="x" * 100)[-1], "…")
+        # Codex は読み取りもシェルで行う
+        self.assertEqual(label("Bash", command="/bin/bash -lc 'sed -n 1,80p %s'" % m.path), "資料を読んでいます")
+        self.assertEqual(label("Bash", command="cat %s" % m.answer_path("q1")), "回答を読み直しています")
 
     def test_answer_check_reports_errors(self):
         self.start()
@@ -773,7 +779,7 @@ class LifecycleTest(ServeTestBase):
         self.assertTrue(self.state()["qa"]["enabled"])
 
     def test_disabled_without_claude(self):
-        self.start(claude=[os.path.join(self.tmp, "no-such-claude")])
+        self.start(claude=[os.path.join(self.tmp, "no-such-claude")], codex=[os.path.join(self.tmp, "no-such-codex")])
         st = self.state()
         self.assertFalse(st["qa"]["enabled"])
         self.assertTrue(st["qa"]["reason"])
@@ -782,17 +788,144 @@ class LifecycleTest(ServeTestBase):
 
     def test_origin_command(self):
         script = os.path.join(SCRIPTS, "serve.py")
-        env = dict(os.environ, CLAUDE_CODE_SESSION_ID="sid-123")
+        env = {k: v for k, v in os.environ.items() if k not in ("CODEX_THREAD_ID", "CLAUDE_CONFIG_DIR")}
+        env["CLAUDE_CODE_SESSION_ID"] = "sid-123"
         subprocess.run([sys.executable, "-I", script, "origin", self.material, "--cwd", self.repo],
                        env=env, check=True, capture_output=True)
         origin = json.loads(self.read("qa", "origin.json"))
-        self.assertEqual((origin["session_id"], origin["cwd"]), ("sid-123", os.path.abspath(self.repo)))
+        self.assertEqual((origin["session_id"], origin["cwd"], origin["agent"]), ("sid-123", os.path.abspath(self.repo), "claude"))
         os.remove(os.path.join(self.material, "qa", "origin.json"))
         env.pop("CLAUDE_CODE_SESSION_ID")
         r = subprocess.run([sys.executable, "-I", script, "origin", self.material], env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(self.material, "qa", "origin.json")))
         self.assertIn("CLAUDE_CODE_SESSION_ID", r.stderr)
+
+
+class CodexAnswerTest(ServeTestBase):
+    """ページの質問に Codex（codex exec。代役は fake_codex.py）で答える。"""
+
+    def origin(self, sid, agent="codex", **extra):
+        os.makedirs(os.path.join(self.material, "qa"), exist_ok=True)
+        with open(os.path.join(self.material, "qa", "origin.json"), "w") as f:
+            json.dump(dict({"session_id": sid, "cwd": self.repo, "agent": agent}, **extra), f)
+
+    def codex_session(self, sid, home=None):
+        path = os.path.join(home or self.codex_home, "sessions", "2026", "10", "12",
+                            "rollout-2026-10-12T10-00-00-%s.jsonl" % sid)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+
+    def codex_calls(self):
+        return [c for c in self.calls() if c.get("agent") == "codex"]
+
+    def test_forks_the_codex_session_then_resumes_it(self):
+        self.codex_session("origin-x")
+        self.origin("origin-x")
+        self.start()
+        first = self.ask("一つ目")
+        self.assertEqual((first["status"], first["session"]), ("answered", "fork"), first)
+        second = self.ask("二つ目")
+        self.assertEqual((second["status"], second["session"]), ("answered", "resume"), second)
+        c1, c2 = self.codex_calls()
+        self.assertEqual(c1["argv"][-3:-1], ["fork", "origin-x"])
+        self.assertEqual(c2["argv"][-3], "resume")
+        self.assertEqual(c1["child"], "1")
+        self.assertIn("apply_patch", c1["prompt"])
+        self.assertIn("Codex", c1["prompt"])
+        session = json.loads(self.read("qa", "session.json"))
+        self.assertEqual(session["agent"], "codex")
+        self.assertEqual(first["answer_html"], "<p>回答: 一つ目</p>")
+
+    def test_failed_fork_retries_with_a_new_codex_session(self):
+        self.codex_session("too-long-origin")
+        self.origin("too-long-origin")
+        self.start()
+        item = self.ask("やり直す")
+        self.assertEqual((item["status"], item["session"]), ("answered", "new"), item)
+        self.assertNotIn("fork", self.codex_calls()[-1]["argv"])
+
+    def test_codex_failure_is_reported(self):
+        self.codex_session("origin-x")
+        self.origin("origin-x")
+        self.start()
+        item = self.ask("FAIL して")
+        self.assertEqual(item["status"], "failed", item)
+        self.assertIn("codex が失敗した", item["error"])
+
+    def test_progress_from_codex_items(self):
+        self.codex_session("origin-x")
+        self.origin("origin-x")
+        self.start()
+        steps = [st["text"] for st in self.ask("途中経過")["progress"]]
+        self.assertIn("資料を読んでいます", steps)
+        self.assertIn("Web で検索しています: visual explain", steps)
+        self.assertIn("MCP（github）を使っています: get_issue", steps)
+        self.assertIn("回答を書いています", steps)
+
+    def test_uses_the_guard_without_a_sandbox(self):
+        self.codex_session("origin-x")
+        self.origin("origin-x")
+        self.start()
+        self.ask("ガード")
+        argv = self.codex_calls()[-1]["argv"]
+        self.assertIn("danger-full-access", argv)
+        policy = json.loads(self.read("qa", "guard-q1.json"))
+        self.assertIn(os.path.join(self.material, "explanation.qa-draft.html"), policy["write_files"])
+        self.assertEqual([os.path.join(self.material, "images")], policy["write_dirs"])
+        self.assertEqual(len(policy["commands"]), 2)
+        self.assertIn('mcp_servers.github.default_tools_approval_mode="approve"', argv)
+
+    def test_sandbox_profile_when_the_sandbox_works(self):
+        os.environ["FAKE_CODEX_SANDBOX"] = "ok"
+        self.addCleanup(os.environ.pop, "FAKE_CODEX_SANDBOX", None)
+        self.codex_session("origin-x")
+        self.origin("origin-x")
+        self.start()
+        self.ask("サンドボックス")
+        argv = " ".join(self.codex_calls()[-1]["argv"])
+        self.assertIn("default_permissions", argv)
+        self.assertNotIn("danger-full-access", argv)
+
+    def test_old_origin_without_agent_is_claude(self):
+        self.origin("origin-y", agent=None)
+        self.start()
+        item = self.ask("古い記録")
+        self.assertEqual(item["status"], "answered", item)
+        self.assertEqual(self.codex_calls(), [])
+
+    def test_agent_option_picks_codex_for_new_sessions(self):
+        self.start(agent="codex")
+        item = self.ask("新しく")
+        self.assertEqual((item["status"], item["session"]), ("answered", "new"), item)
+        self.assertEqual(self.calls()[-1].get("agent"), "codex")
+        self.assertEqual(self.state()["qa"]["agent_name"], "Codex")
+
+    def test_falls_back_when_the_recorded_agent_is_missing(self):
+        self.codex_session("origin-x")
+        self.origin("origin-x")
+        self.start(codex=[os.path.join(self.tmp, "no-codex")])
+        item = self.ask("codex が無い")
+        self.assertEqual((item["status"], item["session"]), ("answered", "new"), item)
+        self.assertEqual(self.codex_calls(), [])
+
+    def test_runs_codex_with_the_recorded_account(self):
+        other = os.path.join(self.tmp, "codex-other")
+        self.codex_session("origin-z", home=other)
+        self.origin("origin-z", config_dir=other)
+        self.start()
+        self.ask("別アカウント")
+        call = self.codex_calls()[-1]
+        self.assertEqual((call["codex_home"], call["argv"][-3:-1]), (other, ["fork", "origin-z"]))
+
+    def test_origin_command_records_the_codex_thread(self):
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CODEX_HOME")}
+        env["CODEX_THREAD_ID"] = "thread-1"
+        out = subprocess.run([sys.executable, "-I", os.path.join(SCRIPTS, "serve.py"), "origin", self.material,
+                              "--cwd", self.repo], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        origin = json.loads(self.read("qa", "origin.json"))
+        self.assertEqual((origin["agent"], origin["session_id"], origin["config_dir"]), ("codex", "thread-1", None))
 
 
 class PanelWidthTest(ServeTestBase):
