@@ -5,8 +5,8 @@
  * BroadcastChannel でやり取りし、読んでいる節・選んだ文字を受け取り、節へのリンクで資料のウィンドウを動かす。
  * 回答を待つ間は claude の途中経過を出し、待機中・作成中の質問は取り消せる。回答が届いたとき、
  * このタブを見ていなければタイトルの先頭に件数を付ける。回答した質問は、資料の末尾の節に書き出せる。
- * Claude Code が AskUserQuestion で質問した資料（ask_hook.py が登録したもの）では、質問欄の上に選択肢を出し、
- * 選んだ答えを配信サーバーに送る（フックが受け取り、元のセッションの AskUserQuestion の答えになる）。 */
+ * エージェント（Claude Code の AskUserQuestion・Codex の request_user_input）が質問した資料（ask_hook.py が
+ * 登録したもの）では、質問欄の上に選択肢を出し、選んだ答えを配信サーバーに送る（フックが受け取り、元のセッションに返す）。 */
 (function () {
   'use strict';
   var script = document.currentScript;
@@ -74,7 +74,7 @@
   var exportBtn = el('button', { type: 'button', class: 've-qa-link ve-qa-export', text: '回答を資料に書き出す',
     title: '質問と回答を資料の末尾の節に書き出します。資料のファイルを人に渡したり印刷したりしても読めます' });
   var tools = el('div', { class: 've-qa-tools', hidden: true }, [exportBtn]);
-  var askBox = el('section', { class: 've-qa-ask', hidden: true, 'aria-label': 'Claude Code からの質問' });
+  var askBox = el('section', { class: 've-qa-ask', hidden: true, 'aria-label': 'エージェントからの質問' });
   var askOthers = el('section', { class: 've-qa-ask-others', hidden: true, 'aria-label': 'ほかに答えを待っている質問' });
   var form = el('form', { class: 've-qa-form' }, [
     quoteBox,
@@ -83,10 +83,10 @@
     el('div', { class: 've-qa-actions' }, [error, send])
   ]);
   var headButtons = WIN ? [detachBtn] : (channel ? [detachBtn, close] : [close]);
+  var agentNote = el('p', { class: 've-qa-note', text: noteText() });
   panel.append(
     el('div', { class: 've-qa-head' }, [el('h2', { text: '質問と回答' })].concat(headButtons)),
-    el('p', { class: 've-qa-note', text: '回答は、資料を配信しているマシンの Claude Code が書きます。資料の説明が足りないと分かったら、本文も直して最新版に切り替えます。' +
-      (WIN ? '資料のウィンドウで読んでいる節と選んだ文字が、質問に添えられます。' : '') }),
+    agentNote,
     askBox, askOthers, notice, empty, list, tools, form
   );
   var resizer = el('div', { class: 've-qa-resize', role: 'separator', 'aria-orientation': 'vertical', tabindex: '0',
@@ -419,7 +419,7 @@
   function away() { return document.hidden || !document.hasFocus(); }
 
   function updateTitle() {
-    // Claude Code からの質問の資料では、答えを待っている質問の件数（ほかのセッションの分も）を付ける
+    // エージェントからの質問の資料では、答えを待っている質問の件数（ほかのセッションの分も）を付ける
     var n = ask ? pendingAsks.length : titleUnseen;
     var t = (n ? '(' + n + ') ' : '') + baseTitle;
     if (document.title !== t) document.title = t;
@@ -596,7 +596,16 @@
     showToast.t = setTimeout(function () { toast.hidden = true; }, 10000);
   }
 
-  // ---- Claude Code からの質問（AskUserQuestion）
+  // ---- エージェントからの質問（AskUserQuestion・request_user_input）
+
+  // 質問したエージェントの名前（Claude Code・Codex）。分からなければ「エージェント」
+  function agentName(a) { return (a && a.agent_name) || 'エージェント'; }
+
+  function noteText() {
+    return '回答は、資料を配信しているマシンの ' + ((qa && qa.agent_name) || 'エージェント') +
+      ' が書きます。資料の説明が足りないと分かったら、本文も直して最新版に切り替えます。' +
+      (WIN ? '資料のウィンドウで読んでいる節と選んだ文字が、質問に添えられます。' : '');
+  }
 
   function askState(a) {
     if (a.status === 'waiting' && !a.waiting) return 'gone';
@@ -663,7 +672,7 @@
         .then(function (x) {
           if (x.r.status === 200) {
             var rest = pendingAsks.filter(function (p) { return p.doc !== DOC; }).length;
-            showToast(['答えを送りました。Claude Code の作業が続きます。' + (rest ? 'ほかに ' + rest + ' 件が答えを待っています。' : '')]);
+            showToast(['答えを送りました。' + agentName(ask) + ' の作業が続きます。' + (rest ? 'ほかに ' + rest + ' 件が答えを待っています。' : '')]);
             renderAsk(x.b);
             refreshAsks();
             return;
@@ -721,7 +730,7 @@
         fresh.forEach(function (a) { alertAsk(a); });
         var next = pendingAsks.filter(function (a) { return a.doc !== DOC; })[0];
         if (next && fresh.length && autoOpen() && ask && askState(ask) !== 'waiting') { location.href = docHref(next.doc); return; }
-        if (fresh.length) showToast(['Claude Code から次の質問が来ました。', el('a', { href: docHref(fresh[0].doc), class: 've-qa-link', text: '開く' })]);
+        if (fresh.length) showToast([agentName(fresh[0]) + ' から次の質問が来ました。', el('a', { href: docHref(fresh[0].doc), class: 've-qa-link', text: '開く' })]);
       })
       .catch(function () { /* 次の知らせで取り直す */ })
       .then(function () { askTimer = setTimeout(refreshAsks, 15000); });  // 締め切り・フックが止まったことを表示に出すため
@@ -770,7 +779,7 @@
     if (!window.isSecureContext || typeof Notification !== 'function' || Notification.permission !== 'granted') return;
     try {
       // 受け箱と質問の資料の両方が開いていても、同じ質問の通知は 1 つ（tag で置き換わる）
-      var n = new Notification('Claude Code からの質問', { body: a.question + (sessionLabel(a) ? '\n' + sessionLabel(a) : ''), tag: 've-qa-ask:' + a.doc });
+      var n = new Notification(agentName(a) + ' からの質問', { body: a.question + (sessionLabel(a) ? '\n' + sessionLabel(a) : ''), tag: 've-qa-ask:' + a.doc });
       n.onclick = function () { window.focus(); if (a.doc !== DOC) location.href = docHref(a.doc); n.close(); };
     } catch (e) { /* 通知を出せない環境 */ }
   }
@@ -817,15 +826,16 @@
     askBox.hidden = !a;
     if (!a) return;
     askBox.setAttribute('data-status', state);
+    askBox.setAttribute('aria-label', agentName(a) + ' からの質問');
     var meta = [], session = a.session || {};
     // どのセッションの質問か: 作業ディレクトリ・ブランチ・最初の依頼
     if (a.where) meta.push('作業ディレクトリ: ' + a.where + (session.branch ? '（' + session.branch + '）' : ''));
     if (state === 'waiting' && a.expires_at) meta.push(clock(a.expires_at) + ' まで待っています');
-    askBox.append(el('h3', { text: 'Claude Code からの質問' }), el('p', { class: 've-qa-meta' }, [meta.join(' · ') + ' ',
+    askBox.append(el('h3', { text: agentName(a) + ' からの質問' }), el('p', { class: 've-qa-meta' }, [meta.join(' · ') + ' ',
       el('a', { href: API + 'inbox', text: '受け箱' })]));
     if (session.prompt) askBox.appendChild(el('p', { class: 've-qa-meta ve-qa-ask-session', text: 'セッションの最初の依頼: 「' + session.prompt + '」' }));
     if (state === 'waiting') {
-      askBox.appendChild(el('p', { class: 've-qa-note-inline', text: '選んで送ると、答えが Claude Code の作業に戻ります（ターミナルの選択画面は出ません）。' }));
+      askBox.appendChild(el('p', { class: 've-qa-note-inline', text: '選んで送ると、答えが ' + agentName(a) + ' の作業に戻ります（ターミナルの選択画面は出ません）。' }));
       askBox.appendChild(askForm(a));
       if (!askSeen[a.id]) {
         askSeen[a.id] = true;
@@ -836,10 +846,10 @@
       }
       return;
     }
-    var text = { answered: '答えを送りました。Claude Code の作業が続いています。',
+    var text = { answered: '答えを送りました。' + agentName(a) + ' の作業が続いています。',
       terminal: 'ターミナルで答えることにしました。ターミナルに選択画面が出ています。',
       expired: '待つ時間を過ぎました。ターミナルで答えてください。',
-      gone: 'Claude Code がもう答えを待っていません（ターミナルで中断された可能性があります）。ターミナルで答えてください。' }[state];
+      gone: agentName(a) + ' がもう答えを待っていません（ターミナルで中断された可能性があります）。ターミナルで答えてください。' }[state];
     askBox.appendChild(el('p', { class: state === 'answered' ? 've-qa-doc' : 've-qa-doc ve-qa-doc-warn', text: text || '' }));
     if (state === 'answered') askBox.appendChild(askAnswers(a));
   }
@@ -872,6 +882,7 @@
   function apply(st) {
     auth = true; online = true;
     qa = st.qa || qa;
+    agentNote.textContent = noteText();
     if (st.now) clockSkew = Date.parse(st.now) - Date.now();
     var fresh = [];
     (st.items || []).forEach(function (item) {

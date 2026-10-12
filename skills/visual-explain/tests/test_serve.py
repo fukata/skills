@@ -135,6 +135,13 @@ class ServeTestBase(unittest.TestCase):
         with open(os.path.join(self.material, *parts), encoding="utf-8") as f:
             return f.read()
 
+    @staticmethod
+    def free_port():
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
 
 class StaticTest(ServeTestBase):
     def test_injects_widget_only_into_the_doc(self):
@@ -1068,6 +1075,13 @@ class WidgetTest(ServeTestBase):
         self.assertIn('aria-valuenow="700"', out)
 
 
+CODEX_QUESTIONS = [
+    {"id": "plan", "header": "案", "question": "どちらの案にしますか？",
+     "options": [{"label": "案A", "description": "一覧で直す"}, {"label": "案B", "description": "詳細で直す"}]},
+    {"id": "where", "header": "場所", "question": "直す所は？",
+     "options": [{"label": "フック", "description": ""}, {"label": "配信", "description": ""}]},
+]
+
 QUESTIONS = [
     {"question": "どちらの案にしますか？", "header": "案", "multiSelect": False,
      "options": [{"label": "案A", "description": "フックが待つ"},
@@ -1100,6 +1114,20 @@ class AskTest(ServeTestBase):
     def good(self):
         return {"どちらの案にしますか？": {"selected": ["案B"], "notes": "速いから"},
                 "直す所は？": {"selected": ["ページ", "サーバー"], "other": "テスト"}}
+
+    def test_pages_name_the_agent_that_asked(self):
+        self.start()
+        status, data = self.register(QUESTIONS[:1], session_id="thread-1", agent="codex", build="never")
+        self.assertEqual(status, 201, data)
+        page = self.req("GET", "/" + data["doc"])[2].decode()
+        self.assertIn("Codex からの質問", page)
+        self.assertNotIn("Claude Code", page)
+        status, data = self.register(QUESTIONS[1:], build="never")
+        self.assertIn("Claude Code からの質問", self.req("GET", "/" + data["doc"])[2].decode())
+        inbox = self.req("GET", "/__qa/inbox")[2].decode()
+        self.assertIn("エージェントからの質問", inbox)
+        asks = json.loads(self.req("GET", "/__qa/asks")[2])["asks"]
+        self.assertEqual(sorted(a["agent_name"] for a in asks), ["Claude Code", "Codex"])
 
     def test_shows_the_choices_and_builds_a_doc_from_the_session(self):
         os.makedirs(os.path.join(self.claude_home, "projects", "-some-project"))
@@ -1320,10 +1348,20 @@ class AskTest(ServeTestBase):
         self.assertIn("サーバー, ページ, テスト", root)
         self.assertNotIn("この答えを送る", root)
         inbox = self.dump("__qa/inbox")
-        self.assertIn("Claude Code からの質問", inbox)
+        self.assertIn("エージェントからの質問", inbox)
         self.assertIn("どちらの案にしますか？", inbox)
         self.assertIn("音で知らせる", inbox)
         self.assertIn("デスクトップ通知", inbox)
+
+    @unittest.skipUnless(check.find_chrome(None), "Chrome が無い")
+    def test_page_names_codex_when_codex_asked(self):
+        self.start(presence=False)
+        _, reg = self.register(QUESTIONS[:1], session_id="thread-1", agent="codex", build="never")
+        out = self.dump(reg["doc"])
+        root = out[out.index('id="ve-qa-root"'):]
+        self.assertIn("Codex からの質問", root)
+        self.assertIn("答えが Codex の作業に戻ります", root)
+        self.assertNotIn("Claude Code", root)
 
     @unittest.skipUnless(check.find_chrome(None), "Chrome が無い")
     def test_page_lists_the_other_waiting_questions(self):
@@ -1384,6 +1422,98 @@ class AskHookTest(ServeTestBase):
         proc.stdin.close()
         proc.stdin = None  # communicate() が閉じた標準入力に書かないように
         return proc
+
+    def codex_hook(self, payload=None, args=("--agent", "codex")):
+        proc = subprocess.Popen([sys.executable, "-I", self.HOOK, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=dict(os.environ))
+        payload = payload or {"session_id": "thread-ask", "cwd": self.repo, "hook_event_name": "PreToolUse",
+                              "tool_name": "request_user_input", "tool_input": {"questions": CODEX_QUESTIONS}}
+        proc.stdin.write(json.dumps(payload))
+        proc.stdin.close()
+        proc.stdin = None
+        return proc
+
+    def test_returns_the_page_answer_to_codex_as_a_deny_reason(self):
+        self.start()
+        self.configure()
+        proc = self.codex_hook()
+        doc = self.registered()
+        st = json.loads(self.req("GET", "/__qa/state?doc=" + doc)[2])
+        self.assertEqual((st["ask"]["agent"], st["ask"]["agent_name"]), ("codex", "Codex"))
+        self.assertFalse(any(q["multiSelect"] for q in st["ask"]["questions"]))
+        status, _, data = self.req("POST", "/__qa/answer", {"doc": doc, "answers": {
+            "どちらの案にしますか？": {"selected": [], "other": "両方", "notes": "急ぎ"}, "直す所は？": {"selected": ["フック"]}}})
+        self.assertEqual(status, 200, data)
+        out, err = proc.communicate(timeout=15)
+        self.assertEqual(proc.returncode, 0, err)
+        res = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual((res["hookEventName"], res["permissionDecision"]), ("PreToolUse", "deny"))
+        reason = res["permissionDecisionReason"]
+        self.assertIn("これが回答である", reason)
+        self.assertIn("http://localhost:%d/%s" % (self.port, doc), reason)
+        self.assertNotIn(TOKEN, reason)  # 合言葉をモデルに渡さない
+        answers = json.loads(reason[reason.index("{"):])
+        self.assertEqual(answers, {"answers": {"plan": {"answers": ["両方", "user_note: 急ぎ"]},
+                                               "where": {"answers": ["フック"]}}})
+
+    def test_codex_session_start_prints_nothing(self):
+        self.start()
+        self.configure(port=self.free_port())
+        self.addCleanup(serve.stop_ask_server, self.home, serve.load_ask_config(self.home))
+        res = subprocess.run([sys.executable, "-I", self.HOOK, "--agent", "codex", "--session-start"], input="{}",
+                             capture_output=True, text=True, timeout=30, env=dict(os.environ))
+        self.assertEqual((res.returncode, res.stdout), (0, ""), res.stderr)
+        claude = subprocess.run([sys.executable, "-I", self.HOOK, "--session-start"], input="{}",
+                                capture_output=True, text=True, timeout=30, env=dict(os.environ))
+        self.assertIn("受け箱", json.loads(claude.stdout)["systemMessage"])  # Claude は今までどおり URL を出す
+
+    def test_duplicate_codex_questions_fall_back_to_the_terminal(self):
+        self.start()
+        self.configure()
+        dup = [dict(CODEX_QUESTIONS[0]), dict(CODEX_QUESTIONS[0], id="again")]
+        proc = self.codex_hook({"session_id": "thread-ask", "cwd": self.repo, "tool_name": "request_user_input",
+                                "tool_input": {"questions": dup}})
+        out, err = proc.communicate(timeout=15)
+        self.assertEqual((proc.returncode, out), (0, ""), err)
+
+    def test_codex_hook_ignores_other_tools(self):
+        self.start()
+        self.configure()
+        proc = self.codex_hook({"session_id": "thread-ask", "cwd": self.repo, "tool_name": "Bash",
+                                "tool_input": {"command": "ls"}})
+        out, err = proc.communicate(timeout=15)
+        self.assertEqual((proc.returncode, out), (0, ""), err)
+        self.assertEqual(json.loads(self.req("GET", "/__qa/asks")[2])["asks"], [])
+
+    def test_codex_question_builds_with_codex_and_its_account(self):
+        account = os.path.join(self.tmp, "codex-account")
+        os.makedirs(os.path.join(account, "sessions", "2026", "10", "12"))
+        open(os.path.join(account, "sessions", "2026", "10", "12", "rollout-x-thread-ask.jsonl"), "w").close()
+        os.environ["CODEX_HOME"] = account
+        self.addCleanup(os.environ.pop, "CODEX_HOME", None)
+        self.start()
+        self.configure(build="always")
+        proc = self.codex_hook({"session_id": "thread-ask", "cwd": self.repo, "tool_name": "request_user_input",
+                                "tool_input": {"questions": [dict(CODEX_QUESTIONS[0], question="BUILD どちら？")]}})
+        doc = self.registered()
+        end = time.time() + 20
+        while time.time() < end and not [c for c in self.calls() if c.get("agent") == "codex"]:
+            time.sleep(0.1)
+        call = [c for c in self.calls() if c.get("agent") == "codex"][0]
+        self.assertEqual((call["codex_home"], call["argv"][-3:-1]), (account, ["fork", "thread-ask"]))
+        self.assertIn("request_user_input", call["prompt"])
+        self.req("POST", "/__qa/ask-close", {"doc": doc, "reason": "terminal"})
+        proc.communicate(timeout=15)
+
+    def test_codex_question_without_codex_shows_only_the_choices(self):
+        self.start(codex=[os.path.join(self.tmp, "no-codex")])
+        self.configure(build="always")
+        proc = self.codex_hook()
+        doc = self.registered()
+        st = json.loads(self.req("GET", "/__qa/state?doc=" + doc)[2])
+        self.assertFalse(st["ask"]["build"])
+        self.req("POST", "/__qa/ask-close", {"doc": doc, "reason": "terminal"})
+        proc.communicate(timeout=15)
 
     def test_ignores_questions_inside_the_servers_own_claude(self):
         self.start()

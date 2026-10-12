@@ -441,7 +441,7 @@ def export_section(items, ids, stamp):
     """回答した質問を、資料の末尾に置く節（印で囲む）にする。ids は資料の id（節へのリンクを残すか決める）。
     stamp は書き出した時刻の文字（YYYY-MM-DD HH:MM）。"""
     out = [EXPORT_BEGIN, '<section id="%s" class="reader-qa">' % EXPORT_ID, "  <h2>%s</h2>" % EXPORT_TITLE,
-           '  <p class="note">資料を配信したページで読み手が質問し、資料を配信したマシンの Claude Code が答えた記録'
+           '  <p class="note">資料を配信したページで読み手が質問し、資料を配信したマシンのエージェント（Claude Code・Codex）が答えた記録'
            "（%d 件。%s に書き出し）。</p>" % (len(items), stamp)]
     for item in items:
         qid = str(item.get("id"))
@@ -946,7 +946,7 @@ def ask_prompt_text(questions):
     return "\n".join(lines)
 
 
-def choice_page(questions, cwd, building):
+def choice_page(questions, cwd, building, agent_name="Claude Code"):
     """質問を受けてすぐ出す、選択肢だけのページ。資料ができたら差し替わる。"""
     esc = html.escape
     with open(TEMPLATE, encoding="utf-8") as f:
@@ -966,14 +966,15 @@ def choice_page(questions, cwd, building):
         parts.append('<section id="question-%d"><h2>%s%s</h2>%s<div class="cards">%s</div></section>' % (
             i, "%s · " % esc(q["header"]) if q["header"] else "", esc(q["question"]),
             '<p class="note">複数選べます。</p>' if q["multiSelect"] else "", "".join(cards)))
-    lead = ("右の欄（質問と回答）で選んで送ると、答えが Claude Code の作業に戻ります。"
+    lead = ("右の欄（質問と回答）で選んで送ると、答えが %s の作業に戻ります。" % agent_name
             + ("選ぶための図入りの資料を作っています。できたら、このページが差し替わります。" if building else ""))
     return ('<!doctype html>\n<html lang="ja">\n<head>\n<meta charset="utf-8">\n'
             '<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>%s</title>\n%s\n</head>\n'
-            '<body>\n<div class="page">\n<main>\n<header>\n<span class="badge">Claude Code からの質問</span>\n'
+            '<body>\n<div class="page">\n<main>\n<header>\n<span class="badge">%s からの質問</span>\n'
             '<h1>%s</h1>\n<p class="lead">%s</p>\n<p class="note">作業ディレクトリ: <code>%s</code> · %s</p>\n</header>\n'
             '%s\n</main>\n</div>\n</body>\n</html>\n' % (
-                esc(title), style, esc(first["question"]), esc(lead), esc(cwd), esc(time.strftime("%Y-%m-%d %H:%M")),
+                esc(title), style, esc(agent_name), esc(first["question"]), esc(lead), esc(cwd),
+                esc(time.strftime("%Y-%m-%d %H:%M")),
                 "\n".join(parts)))
 
 
@@ -1217,21 +1218,24 @@ class App:
             wait = max(10, min(int(body.get("wait") or ASK_WAIT_DEFAULT), ASK_WAIT_MAX))
         except (TypeError, ValueError):
             wait = ASK_WAIT_DEFAULT
-        build = body.get("build") != "never" and self.qa_enabled
+        agent = self.agents.get(body.get("agent")) or self.agents["claude"]
+        # 資料作りは質問したセッションのエージェントで行う。そのエージェントが無ければ、選択肢だけのページにする
+        build = body.get("build") != "never" and self.qa_enabled and agent.available()
         self.prune_asks()
         name = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), secrets.token_hex(3))
         m = Material(self.cfg, "%s/%s" % (name, self.cfg.doc_name))
         os.makedirs(m.qa_dir, exist_ok=True)
         with open(m.path, "w", encoding="utf-8") as f:
-            f.write(choice_page(questions, cwd, build))
+            f.write(choice_page(questions, cwd, build, agent.label))
         config_dir = body.get("config_dir")
         config_dir = config_dir if isinstance(config_dir, str) and os.path.isabs(config_dir) and os.path.isdir(config_dir) else None
         # 質問欄の回答と資料作りは、質問したセッションを分岐して、その作業ディレクトリのリポジトリ・そのアカウントで行う
         write_json(m.origin_path, {"ask": True, "session_id": sid, "cwd": cwd, "repo": git_toplevel(cwd) or cwd,
-                                   "config_dir": config_dir, "recorded_at": now()})
+                                   "agent": agent.key, "config_dir": config_dir, "recorded_at": now()})
         # どのセッションの質問か見分けられるよう、ブランチと、セッションの最初の依頼を添える
-        session = {"id": sid[:8], "branch": git_branch(cwd), "prompt": self.agents["claude"].session_info(sid, None, body.get("transcript_path"))["prompt"]}
-        write_json(m.ask_path, {"id": name, "status": "waiting", "questions": questions, "created_at": now(),
+        session = {"id": sid[:8], "branch": git_branch(cwd), "prompt": agent.session_info(sid, config_dir or agent.default_home(),
+                                                                                     body.get("transcript_path"))["prompt"]}
+        write_json(m.ask_path, {"id": name, "status": "waiting", "agent": agent.key, "questions": questions, "created_at": now(),
                                 "expires_at": now(wait), "cwd": cwd, "session": session, "answers": None,
                                 "annotations": None, "closed_at": None, "build": build})
         with self.lock:
@@ -1275,6 +1279,8 @@ class App:
         view = {k: ask.get(k) for k in ("id", "status", "questions", "created_at", "expires_at", "answers",
                                         "annotations", "closed_at", "build", "session")}
         view["where"] = os.path.basename(str(ask.get("cwd") or "").rstrip("/"))
+        view["agent"] = ask.get("agent") if ask.get("agent") in self.agents else "claude"
+        view["agent_name"] = self.agents[view["agent"]].label
         view["waiting"] = self.waiter_alive(m)
         view["viewers"] = self.viewers
         if view["status"] == "waiting" and passed(ask.get("expires_at")):
@@ -1299,7 +1305,8 @@ class App:
         with self.lock:
             ask = read_json(m.ask_path)
             if not isinstance(ask, dict) or not isinstance(ask.get("questions"), list):
-                return 404, {"error": "この資料には Claude Code からの質問が無い"}
+                return 404, {"error": "この資料にはエージェントからの質問が無い"}
+            name = self.agents.get(ask.get("agent"), self.agents["claude"]).label
             if ask.get("status") != "waiting":
                 return 409, {"error": "この質問はもう締め切った"}
             if passed(ask.get("expires_at")):
@@ -1307,7 +1314,7 @@ class App:
                 write_json(m.ask_path, ask)
                 return 409, {"error": "待つ時間を過ぎた。ターミナルで答えてください"}
             if not self.waiter_alive(m):
-                return 409, {"error": "Claude Code がもう答えを待っていない（ターミナルで中断された可能性がある）。ターミナルで答えてください"}
+                return 409, {"error": "%s がもう答えを待っていない（ターミナルで中断された可能性がある）。ターミナルで答えてください" % name}
             answers, notes = {}, {}
             for q in ask["questions"]:
                 a = given.get(q["question"])
@@ -1338,7 +1345,7 @@ class App:
         with self.lock:
             ask = read_json(m.ask_path)
             if not isinstance(ask, dict):
-                return 404, {"error": "この資料には Claude Code からの質問が無い"}
+                return 404, {"error": "この資料にはエージェントからの質問が無い"}
             if ask.get("status") == "waiting":
                 ask.update(status=reason, closed_at=now())
                 write_json(m.ask_path, ask)
@@ -1359,7 +1366,8 @@ class App:
             if view:
                 out.append({"doc": rel, "status": view["status"], "where": view["where"], "waiting": view["waiting"],
                             "question": view["questions"][0]["question"][:200], "created_at": view["created_at"],
-                            "expires_at": view["expires_at"], "session": view.get("session")})
+                            "expires_at": view["expires_at"], "session": view.get("session"),
+                            "agent": view["agent"], "agent_name": view["agent_name"]})
                 if len(out) >= limit:
                     break
         return out
@@ -2115,10 +2123,10 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_bytes(200, body.encode("utf-8"), "text/html; charset=utf-8", headers=[("Content-Security-Policy", CSP)])
 
     def send_inbox(self):
-        """AskUserQuestion の質問の受け箱。開いておくと、質問が来たときにその資料を開く（中身は inbox.js が作る）。"""
+        """エージェントの質問（AskUserQuestion・request_user_input）の受け箱。開いておくと、質問が来たときにその資料を開く（中身は inbox.js が作る）。"""
         body = ('<!doctype html>\n<html lang="ja">\n<head>\n<meta charset="utf-8">\n'
                 '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-                '<title>Claude Code からの質問</title>\n<link rel="stylesheet" href="/__qa/qa.css">\n</head>\n'
+                '<title>エージェントからの質問</title>\n<link rel="stylesheet" href="/__qa/qa.css">\n</head>\n'
                 '<body class="ve-qa-inbox-page">\n<script src="/__qa/inbox.js" defer></script>\n</body>\n</html>\n')
         self.send_bytes(200, body.encode("utf-8"), "text/html; charset=utf-8", headers=[("Content-Security-Policy", CSP)])
 
@@ -2155,7 +2163,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(404, {"error": "資料が見つからない"})
         if path == "/__qa/ask-status":
             view = self.app.poll_ask(m)
-            return self.send_json(200 if view else 404, view or {"error": "この資料には Claude Code からの質問が無い"})
+            return self.send_json(200 if view else 404, view or {"error": "この資料にはエージェントからの質問が無い"})
         enabled, reason = self.app.qa_status(m)
         self.send_json(200, {"doc": m.rel, "rev": file_rev(m.path), "now": now(),
                              "qa": {"enabled": enabled, "reason": reason, "agent_name": self.app.agent_for(m).label},

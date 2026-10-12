@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""visual-explain の hooks/hooks.json から呼ぶフック。
+"""setup.sh が Claude Code の settings.json と Codex の hooks.json に登録するフック。
 
-  AskUserQuestion の直前（PreToolUse）: 質問を常駐の配信サーバーに登録して資料のページに出し、ページで選ばれた答えを
-    AskUserQuestion の答えとして返す。ターミナルの選択画面は出ず、答えはそのまま元のセッションに届く。
+  python3 -I ask_hook.py [--agent claude|codex] [--session-start]   （--agent の既定は claude）
+
+  質問のツールの直前（PreToolUse。Claude Code は AskUserQuestion、Codex は request_user_input）: 質問を常駐の
+    配信サーバーに登録して資料のページに出し、ページで選ばれた答えを元のセッションに返す。ターミナルの選択画面は出ない。
+    Claude Code には AskUserQuestion の答え（updatedInput）として、Codex にはツールの結果を差し替える手段が無いので、
+    拒否（deny）の理由の文として答えを届ける。
     既定（auto）では、受け箱を一度でも開いたことがあれば常にページで待ち（always）、無ければ受け箱か質問の資料を
     ブラウザで開いているときだけページに出す（open。開いていなければすぐ終える）。off なら何もしない。
     設定は serve.py ask-config で変える。
@@ -21,6 +25,8 @@ import time
 from urllib.parse import quote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ASK_TOOLS = {"claude": "AskUserQuestion", "codex": "request_user_input"}
+ACCOUNT_ENV = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
 
 
 def state_home():
@@ -68,7 +74,23 @@ def configured_mode():
     return "auto"
 
 
-def session_start():
+def hook_agent(argv):
+    return "codex" if "--agent" in argv[:-1] and argv[argv.index("--agent") + 1] == "codex" else "claude"
+
+
+def codex_questions(inp):
+    """request_user_input の質問を AskUserQuestion の形にする（複数選択とプレビューは無い）。id は答えの対応付けに残す。"""
+    out = []
+    for q in inp.get("questions") or []:
+        if not isinstance(q, dict):
+            return None
+        out.append({"question": q.get("question"), "header": q.get("header") or "", "multiSelect": False,
+                    "options": [{"label": o.get("label"), "description": o.get("description") or ""}
+                                for o in q.get("options") or [] if isinstance(o, dict)], "_id": q.get("id")})
+    return out
+
+
+def session_start(agent):
     sys.path.insert(0, HERE)
     import serve
     home = serve.ask_home()
@@ -78,6 +100,8 @@ def session_start():
         running = serve.ensure_ask_server(home, conf, wait=5, blocking=False)
     except OSError:
         running = False
+    if agent == "codex":
+        return 0  # Codex では SessionStart の hook の標準出力がモデルの文脈に入るので、何も出さない
     if serve.ask_effective_mode(conf) == "always":
         # 質問をページで待つ人にだけ、受け箱の URL をターミナルに出す（待っている間はフックから何も出せないため。
         # systemMessage は開発者にだけ見え、会話の文脈には入らない）
@@ -93,14 +117,18 @@ def main():
     # 使わない設定・配信サーバーが動かす claude -p（資料作り・質問欄の回答）の中では何もしない
     if mode == "off" or os.environ.get("VISUAL_EXPLAIN_ASK_CHILD"):
         return 0
+    agent = hook_agent(sys.argv[1:])
     if "--session-start" in sys.argv[1:]:
-        return session_start()
+        return session_start(agent)
     try:
         data = json.load(sys.stdin)
     except ValueError:
         return 0
     inp = data.get("tool_input") if isinstance(data, dict) else None
-    if data.get("tool_name") != "AskUserQuestion" or not isinstance(inp, dict) or inp.get("answers"):
+    if data.get("tool_name") != ASK_TOOLS[agent] or not isinstance(inp, dict) or inp.get("answers"):
+        return 0
+    questions = codex_questions(inp) if agent == "codex" else inp.get("questions")
+    if questions is None:
         return 0
     sys.path.insert(0, HERE)
     import serve
@@ -128,8 +156,9 @@ def main():
             log("配信サーバーを起動できなかった（%s を見る）" % os.path.join(home, "ask-server.log"))
             return 0
         status, reg = serve.ask_request(conf, "POST", "/__qa/ask", {
-            "session_id": data.get("session_id"), "cwd": data.get("cwd"), "questions": inp.get("questions"),
-            "transcript_path": data.get("transcript_path"), "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+            "session_id": data.get("session_id"), "cwd": data.get("cwd"), "agent": agent,
+            "questions": [{k: v for k, v in q.items() if k != "_id"} for q in questions if isinstance(q, dict)],
+            "transcript_path": data.get("transcript_path"), "config_dir": os.environ.get(ACCOUNT_ENV[agent]),
             "wait": conf["wait"], "build": conf["build"]})
     except (OSError, ValueError) as e:
         log("質問を登録できなかった: %s" % e)
@@ -151,10 +180,35 @@ def main():
         except OSError:
             return {}
 
+    def answered_codex(view, stored):
+        """Codex の request_user_input の結果と同じ形の答えを、拒否の理由の文に入れて返す。
+        モデルには「Tool call blocked by PreToolUse hook: <理由>」として届く。"""
+        result = {}
+        for q, key in zip(questions, stored):
+            picked = (view.get("answers") or {}).get(key)
+            if picked is None:
+                continue
+            values = [picked]
+            note = ((view.get("annotations") or {}).get(key) or {}).get("notes")
+            if note:
+                values.append("user_note: %s" % note)
+            result[q["_id"]] = {"answers": values}
+        url = "%s%s" % (conf["public_url"], reg["url"])  # 合言葉は付けない（モデルの文脈に入る）
+        reason = ("ユーザーは資料のページでこの質問に答えた。ツールは実行していないが、これが回答である。"
+                  "同じ質問をし直さず、この回答で作業を続けること。資料: %s\n%s"
+                  % (url, json.dumps({"answers": result}, ensure_ascii=False)))
+        log("ページで答えた: %s" % doc)
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                 "permissionDecisionReason": reason},
+                          "systemMessage": "visual-explain: 資料のページで答えました: %s" % url}, ensure_ascii=False))
+        return 0
+
     def answered(view):
         orca_mark(False)  # 答えたので、付けた未読の印を外す
         # 答えは質問の文で引く。配信サーバーで切り詰めた文ではなく、元の質問の文に付け直す
         stored = [q.get("question") for q in view.get("questions") or []]
+        if agent == "codex":
+            return answered_codex(view, stored)
         answers, notes = {}, {}
         for orig, key in zip(inp.get("questions") or [], stored):
             if key in (view.get("answers") or {}):

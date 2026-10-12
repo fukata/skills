@@ -1,4 +1,4 @@
-/* Claude Code からの質問（AskUserQuestion）の受け箱。serve.py の /__qa/inbox に出す。
+/* エージェントからの質問（Claude Code の AskUserQuestion・Codex の request_user_input）の受け箱。serve.py の /__qa/inbox に出す。
  * 配信サーバーとつないだままにし（/__qa/events）、質問が増えたら一覧を取り直す。答えを待っている質問があれば、
  * その資料を開く（開いた時点で待っている質問も。「自動で開く」を外せば知らせるだけ）。 */
 (function () {
@@ -38,8 +38,8 @@
   var alerts = el('div', { class: 've-qa-alerts' });
   var list = el('ol', { class: 've-qa-inbox-list', 'aria-live': 'polite' });
   var main = el('main', { class: 've-qa ve-qa-inbox' }, [
-    el('h1', { text: 'Claude Code からの質問' }),
-    el('p', { text: 'Claude Code が AskUserQuestion で質問すると、その資料をここから開きます（開いた時点で答えを待っている質問も開きます）。資料の右の欄で選んで送ると、答えが Claude Code の作業に戻ります。このページを一度開くと、それ以降の質問は、ターミナルではなくページで答えを待ちます（ターミナルには「running PreToolUse hooks…」とだけ出ます）。' }),
+    el('h1', { text: 'エージェントからの質問' }),
+    el('p', { text: 'Claude Code（AskUserQuestion）や Codex（request_user_input）が質問すると、その資料をここから開きます（開いた時点で答えを待っている質問も開きます）。資料の右の欄で選んで送ると、答えがそのセッションの作業に戻ります。このページを一度開くと、それ以降の質問は、ターミナルではなくページで答えを待ちます（ターミナルには「running PreToolUse hooks…」とだけ出ます）。' }),
     el('p', {}, [autoBox, el('label', { for: 've-qa-inbox-auto', text: ' 質問が来たら自動で開く' })]),
     alerts, status, list
   ]);
@@ -103,7 +103,7 @@
     if (soundOn) chime();
     if (!window.isSecureContext || typeof Notification !== 'function' || Notification.permission !== 'granted') return;
     try {
-      var n = new Notification('Claude Code からの質問', { body: a.question + (label(a) ? '\n' + label(a) : ''), tag: 've-qa-ask:' + a.doc });
+      var n = new Notification((a.agent_name || 'エージェント') + ' からの質問', { body: a.question + (label(a) ? '\n' + label(a) : ''), tag: 've-qa-ask:' + a.doc });
       n.onclick = function () { window.focus(); location.href = '/' + a.doc.split('/').map(encodeURIComponent).join('/'); n.close(); };
     } catch (e) { /* 通知を出せない環境 */ }
   }
@@ -162,11 +162,11 @@
           location.href = '/' + fresh[0].doc.split('/').map(encodeURIComponent).join('/');
         }
       })
-      .catch(function () { status.textContent = '配信サーバーに接続できません。Claude Code のセッションを始めると、配信サーバーはまた起動します。'; })
+      .catch(function () { status.textContent = '配信サーバーに接続できません。Claude Code か Codex のセッションを始めると、配信サーバーはまた起動します。'; })
       .then(function () { timer = setTimeout(poll, 30000); });  // 締め切りなどの表示を直すため。質問が来たら下の知らせで取り直す
   }
 
-  // つないでいる間は、Claude Code が質問をページに出す。質問が増えた・締め切られたら知らせが来る（切れたら自動でつなぎ直す）
+  // つないでいる間は、エージェントの質問をページに出す。質問が増えた・締め切られたら知らせが来る（切れたら自動でつなぎ直す）
   if (typeof EventSource === 'function') {
     var events = new EventSource(API + 'events');
     events.addEventListener('asks', poll);
