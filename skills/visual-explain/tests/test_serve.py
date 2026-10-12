@@ -398,10 +398,10 @@ class AnswerTest(ServeTestBase):
 
     def test_allows_both_checks(self):
         self.start()
-        m = serve.Material(self.app.cfg, DOC)
-        rules = self.app.allowed_tools(m, {"id": "q3"})
+        self.ask("検査")
+        rules = self.allowed(self.calls()[0])
         self.assertEqual(len([r for r in rules if r.startswith("Bash(") and "check-explanation.py" in r]), 2)
-        self.assertTrue(any("q3.html --fragment --doc" in r for r in rules), rules)
+        self.assertTrue(any("q1.html --fragment --doc" in r for r in rules), rules)
 
     def allowed(self, call):
         argv = call["argv"]
@@ -433,26 +433,15 @@ class AnswerTest(ServeTestBase):
         prompt = self.app.build_prompt(serve.Material(self.app.cfg, DOC), {"id": "q9", "question": "?"})
         self.assertIn("外の情報源: 使えない", prompt)
 
-    def test_reads_mcp_server_names(self):
-        self.assertEqual(serve.list_mcp_servers([sys.executable, FAKE], self.tmp),
-                         ["claude_ai_Gmail", "plugin_slack_slack", "metrics"])
-        self.assertIsNone(serve.list_mcp_servers([os.path.join(self.tmp, "no-such-claude")], self.tmp))
-        self.assertIsNone(serve.list_mcp_servers([sys.executable, "-c", "import sys; print('a: b - c'); sys.exit(1)"],
-                                                 self.tmp))
-        self.assertIsNone(serve.list_mcp_servers([sys.executable, "-c", "import time; time.sleep(30)"], self.tmp,
-                                                 timeout=1))
-        self.assertEqual(serve.list_mcp_servers([sys.executable, "-c", "print('No MCP servers configured.')"], self.tmp),
-                         [])
-
     def test_retries_mcp_list_after_a_failure(self):
         self.start()
         self.assertTrue(self.app.wait_idle(5))
-        self.app.cfg.claude = [os.path.join(self.tmp, "no-such-claude")]
+        self.app.agents["claude"].argv = [os.path.join(self.tmp, "no-such-claude")]
         other = os.path.join(self.tmp, "other")
         os.makedirs(other)
         self.assertEqual(self.app.mcp_servers(other), [])
         self.assertNotIn(other, self.app.mcp)  # 失敗は覚えない
-        self.app.cfg.claude = [sys.executable, FAKE]
+        self.app.agents["claude"].argv = [sys.executable, FAKE]
         self.assertEqual(self.app.mcp_servers(other), ["claude_ai_Gmail", "plugin_slack_slack", "metrics"])
         self.assertIn(other, self.app.mcp)
 
@@ -1749,8 +1738,6 @@ class AskSessionsTest(ServeTestBase):
         session = json.loads(self.req("GET", "/__qa/state?doc=" + doc)[2])["ask"]["session"]
         self.assertEqual(session, {"id": "origin-a", "branch": "feature-x", "prompt": "一覧に 絞り込みを足して"})
         self.assertEqual(json.loads(self.req("GET", "/__qa/asks")[2])["asks"][0]["session"]["branch"], "feature-x")
-        # projects の下の会話の記録だけを読む
-        self.assertIsNone(serve.first_prompt(os.path.join(self.tmp, "other.jsonl")))
 
     def test_runs_claude_with_the_asking_sessions_account(self):
         other = os.path.join(self.tmp, "claude-sub1")

@@ -205,6 +205,13 @@ assert run([d(25, 5, 80)], [{'x': 0, 'y': 0, 'w': 600, 'h': 120}]) == ([], []), 
 PY"
 check "--no-browser ならブラウザの検査を飛ばす" "$C '$V' --repo '$TMP/git' --no-browser | grep -q 'browser=skipped'"
 
+echo "== アダプタ（agents.py）"
+if python3 -I "$HERE/test_agents.py" >"$TMP/agents.log" 2>&1; then
+  ok "agents.py のテスト（$(grep -Eo 'Ran [0-9]+ tests' "$TMP/agents.log")）"
+else
+  ng "agents.py のテスト"; grep -E '^(FAIL|ERROR|Traceback|AssertionError)|Error' "$TMP/agents.log" | head -20
+fi
+
 echo "== 配信サーバー（serve.py。claude は代役。Chrome があれば質問欄の表示も確かめる）"
 if python3 -I "$HERE/test_serve.py" >"$TMP/serve.log" 2>&1; then
   ok "serve.py のテスト（$(grep -Eo 'Ran [0-9]+ tests' "$TMP/serve.log")$(grep -Eo 'skipped=[0-9]+' "$TMP/serve.log" | sed 's/^/, /')）"

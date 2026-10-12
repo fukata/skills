@@ -14,7 +14,6 @@ Python 標準ライブラリだけで動く。
 """
 import argparse
 import functools
-import glob
 import hashlib
 import hmac
 import html
@@ -46,6 +45,8 @@ except ImportError:
     fcntl = None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+import agents as agents_mod  # noqa: E402  エージェントごとに違う所（コマンド・出力・セッション）
 SKILL_DIR = os.path.dirname(SCRIPT_DIR)
 ASSET_DIR = os.path.join(SKILL_DIR, "assets", "qa")
 DEFAULT_PROMPT = os.path.join(ASSET_DIR, "answer-prompt.md")
@@ -66,26 +67,16 @@ MAX_ANSWER = 512 * 1024
 CHECK_TIMEOUT = 600
 KILL_GRACE = 10               # 時間切れで SIGTERM を送ってから SIGKILL までの猶予（秒）
 ALL_INTERFACES = {"", "0.0.0.0", "::", "[::]"}
-# 親の Claude Code セッションから引き継がない環境変数（入れ子のセッションと誤認させない）
-PARENT_ENV = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET",
-              "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_ENTRYPOINT")
-# 読み取りは専用のツールだけにする。git のルールは --output= や --open-files-in-pager= で書き込み・実行ができてしまう
-READ_TOOLS = ["Read", "Grep", "Glob"]
-# 調べものの手分け・スキル・コードの定義の検索。書き込みとコマンドは、手分けした先でも許したものしかできない
-HELPER_TOOLS = ["Task", "Agent", "Skill", "LSP"]
-# 資料とリポジトリの外を調べるツール（--local-only では許さない）。MCP はこのほかにサーバーごとに mcp__<名前> で許す
-# （mcp__* のようなまとめた書き方は効かない）
-EXTERNAL_TOOLS = ["WebSearch", "WebFetch", "ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool"]
-MCP_LIST_TIMEOUT = 60
-# claude mcp list の行（「名前: 接続先 - 状態」）。名前に「:」を含むもの（plugin:slack:slack）もある
-MCP_LINE_RE = re.compile(r"^(\S.*?): \S.* - \S")
+# 親のエージェントのセッションから引き継がない環境変数（入れ子のセッションと誤認させない）
+PARENT_ENV = agents_mod.ClaudeAgent.parent_env
+MCP_LIST_TIMEOUT = agents_mod.MCP_LIST_TIMEOUT
 # 資料の HTML に付ける。質問欄（同じ配信元の qa.js）以外のスクリプトと、外部の資源を読み込ませない
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'")
 BODY_END_RE = re.compile(r"</body\s*>", re.I)
 PUBLIC_ASSETS = ("/__qa/qa.js", "/__qa/qa.css", "/__qa/inbox.js")
 PRIVATE_MESSAGE = "この配信は、案内された URL（?k= 付き）で開いたブラウザにだけ見せる。受け箱の URL で開き直してください。\n"
-SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,100}$")
+SESSION_ID_RE = agents_mod.SESSION_ID_RE
 SECTION_ID_RE = re.compile(r"^[A-Za-z0-9_:.-]{1,200}$")
 MODES = {"new": "新しいセッション", "fork": "資料を作ったセッションを分岐", "resume": "前の質問のセッションの続き"}
 QID_RE = re.compile(r"^q\d{1,9}$")
@@ -184,43 +175,6 @@ def git_toplevel(path):
         return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
     except (OSError, subprocess.SubprocessError):
         return None
-
-
-def list_mcp_servers(claude, cwd, timeout=MCP_LIST_TIMEOUT, env=None):
-    """cwd で claude が読み込む MCP サーバーの名前を、許可のルール（mcp__<名前>）に使う形で返す。調べられなければ None。
-    env は claude を動かす環境（アカウントごとの設定フォルダ CLAUDE_CONFIG_DIR で、読み込む MCP サーバーが変わる）。"""
-    env = env if env is not None else {k: v for k, v in os.environ.items() if k not in PARENT_ENV}
-    try:
-        # 接続の確認で stdio のサーバーを起動するので、時間切れのときは孫ごと止める
-        proc = subprocess.Popen(list(claude) + ["mcp", "list"], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
-                                errors="replace", start_new_session=True)
-    except OSError:
-        return None
-
-    def kill_group():
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-
-    try:
-        out, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        kill_group()
-        proc.communicate()
-        return None
-    kill_group()  # 接続の確認で起動したサーバーが残っていれば止める
-    if proc.returncode != 0:
-        return None
-    names = []
-    for line in (out or "").splitlines():
-        m = MCP_LINE_RE.match(line)
-        # ツールの名前と同じく、英数字・_・- 以外を _ にする（「claude.ai Gmail」は mcp__claude_ai_Gmail__...）
-        name = re.sub(r"[^A-Za-z0-9_-]", "_", m.group(1)) if m else ""
-        if name and name not in names:
-            names.append(name)
-    return names
 
 
 def text_to_html(text):
@@ -714,30 +668,6 @@ def git_branch(cwd):
     return None
 
 
-def first_prompt(path, lines=2000):
-    """セッションの会話の記録から、開発者の最初の依頼の冒頭を取る（どのセッションの質問か見分けるため）。"""
-    if not isinstance(path, str) or not path.endswith(".jsonl") or "projects" not in path.split(os.sep):
-        return None
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for _, line in zip(range(lines), f):
-                try:
-                    ev = json.loads(line)
-                except ValueError:
-                    continue
-                msg = ev.get("message") if isinstance(ev, dict) and ev.get("type") == "user" else None
-                content = msg.get("content") if isinstance(msg, dict) and msg.get("role") == "user" else None
-                if isinstance(content, list):
-                    content = " ".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text")
-                text = re.sub(r"\s+", " ", content or "").strip()
-                # コマンドの記録・システムからの知らせ（<...> で始まる）は依頼ではない
-                if text and not text.startswith("<"):
-                    return text[:120] + ("…" if len(text) > 120 else "")
-    except OSError:
-        return None
-    return None
-
-
 def tailscale_cli():
     for exe in ("tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"):
         path = shutil.which(exe) or (exe if os.path.isfile(exe) else None)
@@ -1042,8 +972,8 @@ def choice_page(questions, cwd, building):
 
 
 class Plan:
-    def __init__(self, mode, args, cwd, forked_from=None):
-        self.mode, self.args, self.cwd, self.forked_from = mode, args, cwd, forked_from
+    def __init__(self, mode, session_id, cwd, forked_from=None):
+        self.mode, self.session_id, self.cwd, self.forked_from = mode, session_id, cwd, forked_from
 
 
 class Result:
@@ -1081,6 +1011,7 @@ class App:
         self.viewers = 0   # 受け箱か質問の資料をブラウザで開いている数（/__qa/events につないだままの接続）
         self.changes = 0   # AskUserQuestion の質問が増えた・締め切られた回数。受け箱に知らせる
         self.changed = threading.Condition()
+        self.agents = {"claude": agents_mod.ClaudeAgent(cfg.claude)}
         self.qa_enabled, self.qa_reason = self.detect_claude()
         for rel in find_docs(cfg):
             self.owns(Material(cfg, rel))
@@ -1090,10 +1021,8 @@ class App:
     def detect_claude(self):
         if not self.cfg.qa:
             return False, "質問の受付を無効にして配信している（--no-qa）"
-        exe = self.cfg.claude[0]
-        found = shutil.which(exe) or (exe if os.path.isfile(exe) and os.access(exe, os.X_OK) else None)
-        if not found:
-            return False, "資料を配信しているマシンに claude コマンドが見つからない（%s）" % exe
+        if not self.agents["claude"].available():
+            return False, "資料を配信しているマシンに claude コマンドが見つからない（%s）" % self.cfg.claude[0]
         return True, None
 
     def owns(self, m):
@@ -1291,7 +1220,7 @@ class App:
         write_json(m.origin_path, {"ask": True, "session_id": sid, "cwd": cwd, "repo": git_toplevel(cwd) or cwd,
                                    "config_dir": config_dir, "recorded_at": now()})
         # どのセッションの質問か見分けられるよう、ブランチと、セッションの最初の依頼を添える
-        session = {"id": sid[:8], "branch": git_branch(cwd), "prompt": first_prompt(body.get("transcript_path"))}
+        session = {"id": sid[:8], "branch": git_branch(cwd), "prompt": self.agents["claude"].session_info(sid, None, body.get("transcript_path"))["prompt"]}
         write_json(m.ask_path, {"id": name, "status": "waiting", "questions": questions, "created_at": now(),
                                 "expires_at": now(wait), "cwd": cwd, "session": session, "answers": None,
                                 "annotations": None, "closed_at": None, "build": build})
@@ -1498,7 +1427,7 @@ class App:
             with open(m.path, "rb") as f:
                 original = f.read()
             self.reset_files(m, qid, original)
-            plan, res = self.ask_claude(m, item, original)
+            plan, res = self.ask_agent(m, item, original)
             if res.canceled or self.canceled(m, qid):
                 self.update(m, qid, status="canceled", finished_at=now(), session=plan.mode)
                 return
@@ -1537,10 +1466,9 @@ class App:
 
     # ---- claude -p
 
-    def transcript_exists(self, session_id, home=None):
-        if not SESSION_ID_RE.match(session_id or ""):
-            return False
-        return bool(glob.glob(os.path.join(home or self.cfg.claude_home, "projects", "*", session_id + ".jsonl")))
+    def agent_for(self, m=None):
+        """その資料の質問に答えるエージェント。"""
+        return self.agents["claude"]
 
     @staticmethod
     def ask_origin(m):
@@ -1548,16 +1476,13 @@ class App:
         o = read_json(m.origin_path) or {}
         return o if o.get("ask") or o.get("repo") else None
 
-    def claude_env(self, m):
-        """claude -p を動かす環境。AskUserQuestion の質問の資料では、質問したセッションのアカウント（設定フォルダ）で動かす
+    def agent_env(self, m, agent):
+        """エージェントを動かす環境。AskUserQuestion の質問の資料では、質問したセッションのアカウント（設定フォルダ）で動かす
         （その会話を分岐でき、使用量もそのアカウントにかかる）。配信サーバーを起動したセッションのアカウントは引き継がない。"""
-        env = {k: v for k, v in os.environ.items() if k not in PARENT_ENV}
-        o = self.ask_origin(m)
-        if o is not None:
-            env.pop("CLAUDE_CONFIG_DIR", None)
-            if o.get("config_dir"):
-                env["CLAUDE_CONFIG_DIR"] = o["config_dir"]
-        return env
+        o = self.ask_origin(m) if m else None
+        if o is None:
+            return agent.child_env(os.environ)
+        return agent.child_env(os.environ, o.get("config_dir"), keep_account=False)
 
     def account_home(self, m):
         o = self.ask_origin(m)
@@ -1565,26 +1490,27 @@ class App:
             return self.cfg.claude_home
         return o.get("config_dir") or os.path.expanduser("~/.claude")
 
-    def session_plan(self, m):
+    def session_plan(self, m, agent):
         s = read_json(m.session_path) or {}
         if SESSION_ID_RE.match(str(s.get("session_id", ""))):
             cwd = s.get("cwd") if os.path.isdir(str(s.get("cwd"))) else self.cfg.workdir
-            return Plan("resume", ["--resume", s["session_id"]], cwd, s.get("forked_from"))
+            return Plan("resume", s["session_id"], cwd, s.get("forked_from"))
         o = read_json(m.origin_path) or {}
-        if self.transcript_exists(str(o.get("session_id", "")), self.account_home(m)):
+        if agent.session_exists(str(o.get("session_id", "")), self.account_home(m)):
             cwd = o.get("cwd") if os.path.isdir(str(o.get("cwd"))) else self.cfg.workdir
-            return Plan("fork", ["--resume", o["session_id"], "--fork-session"], cwd, o["session_id"])
-        return self.new_plan(m)
+            return Plan("fork", o["session_id"], cwd, o["session_id"])
+        return self.new_plan(m, agent)
 
-    def new_plan(self, m=None):
+    def new_plan(self, m, agent):
         # AskUserQuestion の質問の資料は配信フォルダの外のリポジトリの話なので、質問したセッションの作業ディレクトリで答える
         o = (read_json(m.origin_path) or {}) if m else {}
         cwd = o["cwd"] if o.get("repo") and os.path.isdir(str(o.get("cwd"))) else self.cfg.workdir
-        return Plan("new", ["--session-id", str(uuid.uuid4())], cwd)
+        return Plan("new", agent.new_session_id(), cwd)
 
-    def ask_claude(self, m, item, original):
-        plan = self.session_plan(m)
-        res = self.exec_claude(m, item, self.build_prompt(m, item, plan.cwd), plan)
+    def ask_agent(self, m, item, original):
+        agent = self.agent_for(m)
+        plan = self.session_plan(m, agent)
+        res = self.exec_agent(m, item, self.build_prompt(m, item, plan.cwd), plan, agent)
         # 分岐・続きのセッションで失敗した（会話が無い、長すぎる等）ときは、新しいセッションで 1 回だけやり直す。
         # やり直しも失敗したら、次の質問のために元のセッションの記録を残す
         if not res.ok and plan.mode != "new" and not res.timed_out and not res.canceled and not self.stopping.is_set():
@@ -1592,10 +1518,10 @@ class App:
                 self.job().finishing = False
             self.add_step(m, item["id"], "%sを使えなかったため、新しいセッションでやり直しています" % MODES[plan.mode])
             self.reset_files(m, item["id"], original)
-            plan = self.new_plan(m)
-            res = self.exec_claude(m, item, self.build_prompt(m, item, plan.cwd), plan)
+            plan = self.new_plan(m, agent)
+            res = self.exec_agent(m, item, self.build_prompt(m, item, plan.cwd), plan, agent)
         if res.ok:
-            sid = res.session_id or (plan.args[1] if plan.mode != "fork" else None)
+            sid = res.session_id or (plan.session_id if plan.mode != "fork" else None)
             if sid:
                 prev = read_json(m.session_path) or {}
                 write_json(m.session_path, {"session_id": sid, "cwd": plan.cwd,
@@ -1671,8 +1597,9 @@ class App:
         1 回だけ調べ、同時に頼まれたら結果を待つ。調べられなかったときは覚えず、次の質問で調べ直す。"""
         if self.cfg.local_only:
             return []
-        env = self.claude_env(m) if m else None
-        key = (cwd, (env or {}).get("CLAUDE_CONFIG_DIR", "")) if m and self.ask_origin(m) else cwd
+        agent = self.agent_for(m)
+        env = self.agent_env(m, agent)
+        key = (cwd, env.get(agent.account_env, "")) if m and self.ask_origin(m) else cwd
         with self.lock:
             entry = self.mcp.get(key)
             first = entry is None
@@ -1681,7 +1608,7 @@ class App:
         if first:
             names = None
             try:
-                names = list_mcp_servers(self.cfg.claude, cwd, env=env)
+                names = agent.list_mcp(cwd, env)
             finally:
                 entry["names"] = names or []
                 if names is None:
@@ -1692,22 +1619,10 @@ class App:
         entry["done"].wait(MCP_LIST_TIMEOUT + 10)
         return list(entry["names"])
 
-    def allowed_tools(self, m, item, cwd=None):
-        # 絶対パスのルールは「//」で始める。Edit のルールは Write にも効く
-        rules = READ_TOOLS + HELPER_TOOLS
-        rules += ["Edit(/%s)" % m.draft, "Edit(/%s)" % m.answer_path(item["id"]), "Edit(/%s/**)" % m.images_dir]
-        for argv in (self.check_argv(m, m.draft), self.answer_check_argv(m, m.answer_path(item["id"]))):
-            if argv:
-                rules.append("Bash(%s:*)" % shlex.join(argv))
-        if not self.cfg.local_only:
-            rules += EXTERNAL_TOOLS + ["mcp__%s" % name for name in self.mcp_servers(cwd or self.cfg.workdir, m)]
-        return rules
-
     def external_sources(self, cwd, m=None):
         if self.cfg.local_only:
             return "使えない（配信の設定で止めてある）。資料とリポジトリだけで答える"
-        names = self.mcp_servers(cwd, m)
-        return "Web の検索（WebSearch）と取得（WebFetch）、MCP のサーバー（%s）" % ("、".join(names) if names else "無し")
+        return self.agent_for(m).external_label(self.mcp_servers(cwd, m))
 
     def build_prompt(self, m, item, cwd=None):
         build = item.get("kind") == "build"
@@ -1733,16 +1648,18 @@ class App:
         question = ask_prompt_text((self.ask_view(m) or {}).get("questions") or []) if build else item["question"]
         return text.replace("{{question}}", question.replace("</question>", "&lt;/question>"))
 
-    def exec_claude(self, m, item, prompt, plan):
-        # 途中経過を受け取るため、出力は 1 行 1 イベントの stream-json にする（-p では --verbose が要る版がある）
-        cmd = list(self.cfg.claude) + ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk"]
-        if self.cfg.model:
-            cmd += ["--model", self.cfg.model]
-        cmd += plan.args
-        if not inside(m.dir, plan.cwd):
-            cmd += ["--add-dir", m.dir]
-        cmd += ["--allowedTools"] + self.allowed_tools(m, item, plan.cwd)
-        env = self.claude_env(m)
+    def agent_run(self, m, item, plan, agent):
+        """エージェントに 1 件の質問を答えさせる（資料を作らせる）ための材料。書いてよいのは作業用コピー・回答・images/、
+        動かしてよいのは検査だけ。"""
+        checks = [a for a in (self.check_argv(m, m.draft), self.answer_check_argv(m, m.answer_path(item["id"]))) if a]
+        return agents_mod.Run(mode=plan.mode, session_id=plan.session_id, cwd=plan.cwd, material_dir=m.dir,
+                              write_files=[m.draft, m.answer_path(item["id"])], write_dirs=[m.images_dir],
+                              check_argvs=checks, model=self.cfg.model, local_only=self.cfg.local_only,
+                              mcp_names=[] if self.cfg.local_only else self.mcp_servers(plan.cwd, m))
+
+    def exec_agent(self, m, item, prompt, plan, agent):
+        cmd = agent.command(self.agent_run(m, item, plan, agent))
+        env = self.agent_env(m, agent)
         env[ASK_CHILD_ENV] = "1"
         job = self.job()
         with self.lock:
@@ -1754,9 +1671,9 @@ class App:
                                         stderr=subprocess.PIPE, env=env, start_new_session=True,
                                         text=True, encoding="utf-8", errors="replace")
             except OSError as e:
-                return Result(False, error="claude を起動できなかった: %s" % e)
+                return Result(False, error="%s を起動できなかった: %s" % (agent.argv[0] if agent.argv else agent.key, e))
             job.proc = proc
-        result, raw, err = [], [], []
+        reader, raw, err = agent.reader(), [], []
 
         def read_out():
             with proc.stdout:  # 読み終えたらこのスレッドで閉じる（読んでいる途中に別のスレッドから閉じると待たされる）
@@ -1771,18 +1688,12 @@ class App:
             raw.append(line)
             del raw[:-20]
             try:
-                ev = json.loads(line)
-            except ValueError:
-                return
-            # 回答に要るのは最後の result だけ。--output-format json と同じ形（配列 1 つ）で返す版にも備える
-            for e in (ev if isinstance(ev, list) else [ev]):
-                if isinstance(e, dict) and e.get("type") == "result":
-                    result[:] = [e]
-            if isinstance(ev, dict):
-                try:
-                    self.on_event(m, item["id"], ev)
-                except Exception:  # 途中経過の失敗で回答を止めない
-                    pass
+                for name, inp in reader.feed(line):
+                    text = self.step_label(m, item["id"], name, inp)
+                    if text:
+                        self.add_step(m, item["id"], text)
+            except Exception:  # 途中経過の失敗で回答を止めない
+                pass
 
         readers = [threading.Thread(target=read_out, daemon=True), threading.Thread(target=read_err, daemon=True)]
         for t in readers:
@@ -1794,7 +1705,7 @@ class App:
                 proc.stdin.close()
             except OSError:  # 先に終わった（起動に失敗した等）。結果は終了コードと標準エラーで見る
                 pass
-            timed_out = self.wait_claude(m, item["id"], proc, job)
+            timed_out = self.wait_agent(m, item["id"], proc, job)
         finally:
             # 終わった後も、claude が残した子プロセスごと止める（パイプを持ったままだと読み取りが終わらない）
             try:
@@ -1815,16 +1726,13 @@ class App:
                           % self.cfg.answer_timeout, timed_out=True)
         if self.stopping.is_set():
             return Result(False, error="配信を止めたため中断した。")
-        result = result[0] if result else None
-        if proc.returncode != 0 or result is None or result.get("is_error"):
-            out = "".join(raw)
-            detail = ((result or {}).get("result") or "".join(err).strip()[-800:] or out.strip()[-800:]
-                      or "終了コード %d" % proc.returncode)
-            return Result(False, error="claude が失敗した: %s" % detail)
-        return Result(True, text=result.get("result") or "", session_id=result.get("session_id"))
+        ok, text, session_id, error = reader.result(proc.returncode, "".join(err), "".join(raw))
+        if not ok:
+            return Result(False, error=error)
+        return Result(True, text=text, session_id=session_id)
 
-    def wait_claude(self, m, qid, proc, job):
-        """claude の終わりを待つ。時間切れ・取り消し・配信の停止では SIGTERM を送り、KILL_GRACE 秒後も残っていれば
+    def wait_agent(self, m, qid, proc, job):
+        """エージェントの終わりを待つ。時間切れ・取り消し・配信の停止では SIGTERM を送り、KILL_GRACE 秒後も残っていれば
         SIGKILL で止める。戻り値は時間切れだったか。"""
         deadline = time.time() + self.cfg.answer_timeout if self.cfg.answer_timeout else None
         timed_out, term_at, next_check = False, None, 0
@@ -1849,16 +1757,6 @@ class App:
                     self.kill(job)
             elif time.time() - term_at >= KILL_GRACE:
                 self.kill(job, signal.SIGKILL)
-
-    def on_event(self, m, qid, ev):
-        """claude のイベントから、ツールの呼び出しを途中経過として残す。"""
-        if ev.get("type") != "assistant":
-            return
-        for block in (ev.get("message") or {}).get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                text = self.step_label(m, qid, str(block.get("name") or ""), block.get("input"))
-                if text:
-                    self.add_step(m, qid, text)
 
     def building_job(self, m, qid):
         job = self.jobs.get((m.rel, qid))
