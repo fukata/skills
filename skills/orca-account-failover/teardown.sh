@@ -4,28 +4,21 @@
 set -euo pipefail
 
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/settings.sh
-source "$dir/lib/settings.sh"
+settings="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "jq が必要です" >&2
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 が必要です" >&2
   exit 1
 fi
-if [ ! -f "$(settings_path)" ]; then
-  echo "登録はありません（$(settings_path) がありません）"
+if [ ! -f "$settings" ]; then
+  echo "登録はありません（$settings がありません）"
   exit 0
 fi
 
-rewrite_settings '
-  if (.hooks.StopFailure? // null) == null then .
-  else
-    .hooks.StopFailure |= without_failover
-    | if (.hooks.StopFailure | length) == 0 then del(.hooks.StopFailure) else . end
-  end
-'
+result="$(python3 -I "$dir/lib/settings.py" remove --file "$settings")"
 
-if [ "$settings_changed" = 1 ]; then
-  echo "登録を取り除きました: $(settings_path)"
+if [ "$result" = changed ]; then
+  echo "登録を取り除きました: $settings"
 else
   echo "登録はありません"
 fi

@@ -23,7 +23,7 @@ Claude Code の `StopFailure` hook として動く。Orca の端末で動く対�
 - Linux（`/proc` と `setsid` を使う）
 - Orca デスクトップアプリが起動していて、切替可能な Claude 認証先が 2 つ以上ある（`orca account list` の管理アカウントと、保存済みの System Default）
 - Claude Code のネイティブ版（プロセス名が `claude`）
-- `jq`（登録・解除のスクリプトが使う）
+- Python 3（登録・解除のスクリプトが使う。標準ライブラリだけで動く）
 
 Orca 1.4.220 / Claude Code 2.1.292 で確認している。
 
@@ -147,6 +147,7 @@ Orca のデータディレクトリを変更している場合は、hook の環�
 ## テスト
 
 ```bash
-node --test <skill>/test/*.test.js        # 判定・System Default の候補追加と切替 RPC
-bash <skill>/test/settings.test.sh        # 登録・解除（一時ディレクトリで実行し、実際の設定には触れない）
+bash <skill>/tests/run.sh                 # 下の 2 つをまとめて実行する
+node --test <skill>/tests/*.test.js       # 判定・System Default の候補追加と切替 RPC
+bash <skill>/tests/settings.test.sh       # 登録・解除（一時ディレクトリで実行し、実際の設定には触れない）
 ```
