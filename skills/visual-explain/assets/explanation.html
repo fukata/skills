@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>図解資料のテンプレート</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #203044; background: #f3f5f8;
+            --line: #d9e0e8; --muted: #516176; --key: #1d5f9e; --key-bg: #e6f0fa; --warn: #9a5200; --warn-bg: #fff3df; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-size: 16px; line-height: 1.8; overflow-wrap: anywhere; }
+    main { max-width: 1100px; margin: auto; padding: 40px 24px 64px; }
+    body:has(#wide:checked) main { max-width: none; }
+    /* 目次: 本文を置ける幅が広いときは左のサイドバーにしてスクロールに付いてこさせ、狭いときは見出しの下に横に並べる。
+       幅は画面ではなく .page で測る（配信時に質問欄が開いて本文が狭くなった場合も切り替わる） */
+    .page { container-type: inline-size; }
+    nav.toc { margin: -8px 0 28px; }
+    .toc-title { display: none; }
+    @container (min-width: 1000px) {
+      main { max-width: 1320px; display: grid; grid-template-columns: 200px minmax(0, 1fr); column-gap: 40px; }
+      main > * { grid-column: 2; }
+      main > nav.toc { grid-column: 1; grid-row: 1 / span 200; align-self: start; position: sticky; top: 24px; display: block;
+                       max-height: calc(100vh - 48px); overflow-y: auto; margin: 0; padding: 4px 0; font-size: .9rem; line-height: 1.5; }
+      .toc-title { display: block; margin: 0 0 8px; color: var(--muted); font-size: .8rem; font-weight: 700; }
+      nav.toc a { display: block; padding: 6px 0 6px 12px; border-left: 3px solid var(--line); text-decoration: none; }
+      nav.toc a:hover { border-left-color: #125ba1; }
+      nav.toc a[aria-current="true"] { border-left-color: var(--key); color: #203044; font-weight: 700; }
+    }
+    /* 読みやすさ: 段落は約45文字で折り返し、図と表は本文の幅まで使う。見出しなどは文節で改行する */
+    section > p, section > ul, section > ol, section > details, header > p { max-width: 45em; }
+    h1, h2, h3, .lead, .key, figcaption { word-break: auto-phrase; }
+    h1, h2, h3 { font-feature-settings: "palt"; }
+    :not(pre) > code { background: #eef1f5; border-radius: 4px; padding: .05em .35em; }
+    section[id], figure[id], table[id] { scroll-margin-top: 16px; }
+    @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+    header { margin-bottom: 28px; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.6rem); line-height: 1.35; margin: 12px 0; }
+    h2 { font-size: 1.35rem; margin: 0 0 16px; }
+    h3 { font-size: 1.05rem; margin: 20px 0 8px; }
+    p { margin: 8px 0 16px; }
+    a { color: #125ba1; text-underline-offset: 3px; }
+    a:focus-visible, summary:focus-visible, label:focus-within, [tabindex]:focus-visible { outline: 3px solid #125ba1; outline-offset: 4px; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 20px; }
+    .toolbar { display: flex; justify-content: flex-end; font-size: .85rem; color: var(--muted); }
+    .toolbar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    section { background: white; border: 1px solid var(--line); border-radius: 14px; padding: 28px; margin: 20px 0; }
+    .badge { display: inline-block; background: #e8eef8; color: #254c7a; border-radius: 6px; padding: 2px 10px; font-size: .85rem; font-weight: 650; }
+    .lead { font-size: 1.2rem; font-weight: 650; }
+    .note, figcaption { color: var(--muted); font-size: .9rem; }
+    /* 重みの部品。ラベルを付け、色だけで区別しない */
+    .key, .warn { padding: 12px 16px; border-radius: 0 8px 8px 0; }
+    .key { border-left: 5px solid var(--key); background: var(--key-bg); font-weight: 650; }
+    .warn { border-left: 5px solid var(--warn); background: var(--warn-bg); }
+    .key::before, .warn::before, .aside::before { display: inline-block; margin-right: 8px; padding: 0 8px; border-radius: 4px; font-size: .8rem; font-weight: 700; }
+    .key::before { content: "要点"; background: var(--key); color: white; }
+    .warn::before { content: "注意"; background: var(--warn); color: white; }
+    .aside { color: var(--muted); font-size: .9rem; border-left: 2px solid var(--line); padding-left: 14px; }
+    .aside::before { content: "補足"; border: 1px solid var(--line); }
+    details.more { color: var(--muted); font-size: .9rem; margin: 12px 0; }
+    details.more > summary { font-weight: 650; }
+    dl.terms { display: grid; grid-template-columns: minmax(8em, max-content) 1fr; gap: 6px 20px; margin: 12px 0; }
+    dl.terms dt { font-weight: 650; }
+    dl.terms dd { margin: 0; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; margin-bottom: 16px; }
+    .card { min-width: 0; padding: 20px; background: #f7f9fc; border: 1px solid var(--line); border-radius: 10px; }
+    figure { margin: 16px 0; }
+    img { max-width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 8px; }
+    figcaption { margin-top: 10px; }
+    .scroll { max-width: 100%; overflow-x: auto; }
+    /* 図は本来の大きさ（svg の width・height。viewBox と同じ値を書く）まで広げ、本文が狭いときだけ縮める。
+       width の無い図は本文の幅に合わせる（広い画面で拡大しすぎないよう 1000px まで） */
+    .diagram svg { display: block; max-width: 100%; min-width: 640px; height: auto; }
+    .diagram svg:not([width]) { width: 100%; max-width: 1000px; }
+    /* 表は中身に合う幅にする（列の少ない表を広い画面で横に引き伸ばさない） */
+    table { border-collapse: collapse; width: auto; min-width: 480px; }
+    th, td { padding: 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { background: #f3f5f8; }
+    pre { white-space: pre-wrap; padding: 16px; background: #f3f5f8; border-radius: 8px; }
+    code { font-family: ui-monospace, monospace; font-size: .9em; }
+    summary { cursor: pointer; }
+    @media (max-width: 600px) { main { padding: 24px 12px; } section { padding: 20px 16px; } dl.terms { grid-template-columns: 1fr; } dl.terms dd { margin-bottom: 8px; } }
+    /* 印刷は A4 縦（本文の幅は約 700px）。節の枠をやめて途中で改ページできるようにし、スクロールと高さの制限を外す */
+    @page { size: A4; margin: 12mm; }
+    @media print {
+      :root { background: white; }
+      body { font-size: 13px; }
+      main, body:has(#wide:checked) main { max-width: none; padding: 0; }
+      nav, main > nav.toc, .toolbar { display: none; }
+      section > p, section > ul, section > ol, section > details, header > p { max-width: none; }
+      section { border: 0; border-radius: 0; padding: 0; margin: 0 0 10mm; }
+      h2, h3 { break-after: avoid; }
+      figure, tr, .key, .warn, .card { break-inside: avoid; }
+      .scroll, pre { overflow: visible; max-height: none; }
+      .diagram svg, table { min-width: 0; }
+      .key, .warn, .key::before, .warn::before, .badge, th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      details::details-content { content-visibility: visible; display: block; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+<main>
+  <!-- Copy to the output folder. Replace example content and remove unused sections/navigation. Keep the toolbar, the table of contents (nav.toc right after the header) and the print CSS. -->
+  <header>
+    <div class="toolbar"><label><input type="checkbox" id="wide">横幅いっぱいに表示</label></div>
+    <span class="badge">テンプレート・架空の例</span>
+    <h1>画面操作と遷移の説明</h1>
+    <p class="lead">最初に伝える結論をここに記載します。以下はレイアウトの例であり、実装済みの仕様ではありません。</p>
+    <p class="note">対象・確認日・環境・確認済み／提案／未検証の区分を記載します。</p>
+  </header>
+  <nav class="toc" aria-label="資料の目次">
+    <p class="toc-title">目次</p>
+    <a href="#context">前提</a><a href="#flow">遷移図</a><a href="#screens">画面と操作</a><a href="#compare">案の比較</a><a href="#evidence">根拠</a>
+  </nav>
+  <section id="context">
+    <h2>前提</h2>
+    <p>何の製品・機能の話かを、誰が何のために使うかと一緒に、その製品を知らない人に向けて書きます。</p>
+    <p>読む前に要る仕組み（処理の流れ・日程・データの持ち方）を書きます。流れや日程は文章だけで済ませず、ここに図を置きます。</p>
+    <p>どんな状況の話で、なぜこの資料を作ったか（何を決める・確かめるためか）を書きます。会話でしか伝えていない背景もここに書き直します。</p>
+    <dl class="terms">
+      <dt>用語の例</dt><dd>用語・画面名・略語・チケット番号・コードの名前の意味を、読み手が知っている言葉で一言書きます。</dd>
+    </dl>
+    <p class="note">この資料で答える問い: 図ごとに、読み終えた人が答えられるようになる問いを書きます。</p>
+  </section>
+  <section id="flow">
+    <h2>図1 · 全体の流れ</h2>
+    <p class="key">この図から読み取ってほしい結論を1〜2文で書きます。</p>
+    <figure>
+      <div class="scroll diagram" tabindex="0" role="region" aria-label="遷移図。狭い画面では横スクロールできます">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 170" width="800" height="170" role="img" aria-labelledby="flow-title flow-desc">
+          <title id="flow-title">架空の一覧から編集、詳細への遷移例</title>
+          <desc id="flow-desc">画面1の一覧から編集を選ぶと画面2へ進み、保存成功で画面3の詳細へ進みます。</desc>
+          <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#296fa8"/></marker></defs>
+          <g fill="#eef5fc" stroke="#296fa8" stroke-width="2">
+            <rect x="10" y="55" width="190" height="80" rx="12"/><rect x="300" y="55" width="190" height="80" rx="12"/><rect x="600" y="55" width="190" height="80" rx="12"/>
+            <path d="M200 95 H290" marker-end="url(#arrow)"/><path d="M490 95 H590" marker-end="url(#arrow)"/>
+          </g>
+          <g fill="#203044" text-anchor="middle" font-size="19" font-family="system-ui, sans-serif">
+            <text x="105" y="102">画面1: 一覧</text><text x="395" y="102">画面2: 編集</text><text x="695" y="102">画面3: 詳細</text>
+            <text x="245" y="75" font-size="15">編集</text><text x="545" y="75" font-size="15">保存成功</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>図1: 例示。一覧 → 編集 → 保存成功 → 詳細。確認した失敗経路・戻る操作も必要に応じて追加します。</figcaption>
+    </figure>
+    <p>図の後に、重要な分岐や制約を書きます。</p>
+    <p class="warn">起きると困ることを、どんなときに起きるか（そこへ至る操作と状態）と一緒に書きます。</p>
+    <p class="aside">なくても筋が追える細部を書きます。長い補足は下の「詳しく」に畳みます。</p>
+    <details class="more"><summary>詳しく</summary><p>畳んだ補足は画面では閉じ、印刷では開いて表示されます。</p></details>
+  </section>
+  <section id="screens">
+    <h2>画面と操作</h2>
+    <p class="note">テンプレートには実画面のスクショを含みません。取得・目視確認した画像を本文中に挿入してください。</p>
+    <!-- Enable only after the referenced real image exists; replace alt and caption.
+    <figure>
+      <img src="images/screen-01-list.png" alt="画面1: 一覧。対象行の編集ボタン" loading="lazy">
+      <figcaption>画面1: 一覧。対象行の「編集」を選びます。</figcaption>
+    </figure>
+    -->
+    <ol><li>操作対象と操作内容を記載します。</li><li>操作後に確認できる変化を記載します。</li></ol>
+  </section>
+  <section id="compare">
+    <h2>案の比較 · 提案の例</h2>
+    <h3>判断の基準</h3>
+    <ul><li>規約・ガイドラインへの準拠（引用元を書く）</li><li>既存の画面や処理との一貫性</li><li>利用者への影響（入力やデータの喪失、覚えた操作の変化）</li><li>実装の手間と影響範囲</li></ul>
+    <div class="cards">
+      <article class="card" id="option-a"><h3>案A · 編集画面</h3><p>一覧から編集画面へ移り、保存すると詳細画面へ進みます。</p><p class="note">多くの項目をまとめて編集する案。画面移動が必要です。</p></article>
+      <article class="card" id="option-b"><h3>案B · 行内編集</h3><p>一覧の行の中で編集し、保存しても一覧に留まります。</p><p class="note">少数項目を一覧で編集する案。入力欄の配置に制約があります。</p></article>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>観点</th><th>案A</th><th>案B</th><th>根拠</th></tr></thead>
+        <tbody>
+          <tr><td>規約</td><td>準拠／反する</td><td>準拠／反する</td><td>引用元のファイルと節</td></tr>
+          <tr><td>利用者への影響</td><td>確認できた内容</td><td>確認できた内容</td><td>コードの行・仕様</td></tr>
+          <tr><td>利用実態</td><td>未確認（理由）</td><td>未確認（理由）</td><td>計測の有無</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="key">推奨: 中立の比較とは分けて、推奨する案と理由を書きます。推奨が無ければこの欄を削除します。</p>
+    <p>回答はチャットの質問欄で行います。この静的HTMLから回答を送信する機能はありません。</p>
+  </section>
+  <section id="evidence">
+    <h2>根拠・確認範囲</h2>
+    <p>実際に読んだ仕様・コードのファイルと行、撮影した画面の環境を記載します。</p>
+    <details><summary>未検証の事項</summary><p>ローカルでの表示確認とOrca Clientでの表示確認を区別して記載します。</p></details>
+  </section>
+</main>
+</div>
+</body>
+</html>
