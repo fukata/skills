@@ -157,6 +157,9 @@ if $C "$V" --repo "$TMP/git" --json | python3 -c 'import json,sys; b=json.load(s
   check "'crossln' は [svg-text-on-line] の警告"   "out=\$($C '$TMP/crossln/explanation.html' --repo '$TMP/git'); [ \$? -eq 0 ] && grep -q 'WARN  \[svg-text-on-line\].*翌月1日に集計する' <<<\"\$out\""
   check "破線は文字を貫いても警告しない"            "! $C '$TMP/crossdsh/explanation.html' --repo '$TMP/git' | grep -q 'svg-text-on-line'"
   check "--chrome に無いパスを渡しても他で見つける" "$C '$V' --repo '$TMP/git' --chrome /nonexistent | grep -q 'browser=.*px'"
+  # 実際の事故: PATH で先に見つかった Chromium がページを取り出さずに止まり、検査のたびに時間切れまで待った
+  printf '#!/bin/sh\nexit 0\n' >"$TMP/broken-chrome" && chmod +x "$TMP/broken-chrome"
+  check "--chrome が動かないものなら他で見つける" "$C '$V' --repo '$TMP/git' --chrome '$TMP/broken-chrome' | grep -q 'browser=.*px'"
   # 実際の事故: 印刷すると、高さを制限したレスポンス例が途中で切れ、横長の図の文字が 7px まで縮んだ
   mut prclip   '</main>' '</main><pre style="max-height:40px;overflow:auto">1
 2
