@@ -16,7 +16,7 @@ Client側のブラウザで開く（A: URLを入力、B: ファイル一覧か�
 図とスクショを確認 → 必要ならAskUserQuestionで回答（質問文とプレビューに資料のURL）
 ```
 
-スキルはClaudeが実行される環境で読み込まれている必要がある。Serve側でClaudeを起動するなら、そのClaudeのプラグイン環境にインストールする。Client側だけへのインストールがServe側にも反映されるとは仮定しない。
+スキルはClaudeが実行される環境で読み込まれている必要がある。Serve側でエージェント（Claude Code・Codex）を起動するなら、Serve側にスキルを入れ、setup.sh で hook を登録する。Client側だけへのインストールがServe側にも反映されるとは仮定しない。
 
 ## 1. ホストとworktreeを特定する
 

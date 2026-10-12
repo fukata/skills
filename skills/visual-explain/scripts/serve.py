@@ -1493,7 +1493,7 @@ class App:
     @staticmethod
     def recorded_agent(m):
         """資料に記録したエージェント（質問に答えているセッション、無ければ資料を作ったセッション）。記録が無ければ None。
-        エージェントを書いていない記録（zaicodev 版で作ったもの）は Claude Code。"""
+        エージェントを書いていない記録（Claude Code 専用だった版で作ったもの）は Claude Code。"""
         s = read_json(m.session_path)
         if isinstance(s, dict) and SESSION_ID_RE.match(str(s.get("session_id", ""))):
             return s.get("agent") or "claude"
