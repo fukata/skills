@@ -212,6 +212,13 @@ else
   ng "agents.py のテスト"; grep -E '^(FAIL|ERROR|Traceback|AssertionError)|Error' "$TMP/agents.log" | head -20
 fi
 
+echo "== Codex のガード（codex_guard.py）"
+if python3 -I "$HERE/test_codex_guard.py" >"$TMP/guard.log" 2>&1; then
+  ok "codex_guard.py のテスト（$(grep -Eo 'Ran [0-9]+ tests' "$TMP/guard.log")）"
+else
+  ng "codex_guard.py のテスト"; grep -E '^(FAIL|ERROR|Traceback|AssertionError)|Error' "$TMP/guard.log" | head -20
+fi
+
 echo "== 配信サーバー（serve.py。claude は代役。Chrome があれば質問欄の表示も確かめる）"
 if python3 -I "$HERE/test_serve.py" >"$TMP/serve.log" 2>&1; then
   ok "serve.py のテスト（$(grep -Eo 'Ran [0-9]+ tests' "$TMP/serve.log")$(grep -Eo 'skipped=[0-9]+' "$TMP/serve.log" | sed 's/^/, /')）"
