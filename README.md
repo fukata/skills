@@ -12,8 +12,17 @@ npx skills update -g                                             # 更新
 
 | skill | 内容 |
 | --- | --- |
-| [orca-account-failover](skills/orca-account-failover/SKILL.md) | Orca の端末で動く Claude Code セッションが利用上限で止まったとき、別の Claude アカウントへ切り替えて同じ端末で自動再開する hook。インストール後に `setup.sh` で hook を登録する |
+| [orca-account-failover](skills/orca-account-failover/README.md) | Orca の端末で動く Claude Code セッションが利用上限で止まったとき、別の Claude アカウントへ切り替えて同じ端末で自動再開する hook。インストール後に `setup.sh` で hook を登録する |
 | [visual-explain](skills/visual-explain/README.md) | 仕様・変更・仕組みを図解の HTML 資料にして配信し、ページからの質問にエージェントが答える。Claude Code と Codex の質問（AskUserQuestion / request_user_input）にもページで答えられる。インストール後に `setup.sh` で hook を登録する |
+
+## 開発
+
+```bash
+bash test.sh                    # すべてのスキルのテスト
+bash test.sh visual-explain     # スキルを指定する
+```
+
+スキルを足す・直すときの決まりは [AGENTS.md](AGENTS.md) にあります。
 
 ## ライセンス
 
