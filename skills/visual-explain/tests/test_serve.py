@@ -1873,11 +1873,59 @@ class AskServerTest(unittest.TestCase):
         serve.save_ask_config(self.home, {"bind": "127.0.0.1", "port": self.port})
         self.conf = serve.load_ask_config(self.home, create=True)
 
+    def run(self, result=None):
+        # テストが失敗したら、tearDown が置き場所を消す前に配信サーバーの様子を出す
+        name = self._testMethodName
+        method = getattr(self, name)
+
+        def reporting():
+            try:
+                return method()
+            except unittest.SkipTest:
+                raise
+            except BaseException:
+                self.dump_state()
+                raise
+        setattr(self, name, reporting)
+        try:
+            return super().run(result)
+        finally:
+            delattr(self, name)
+
     def tearDown(self):
         serve.stop_ask_server(self.home, self.conf)
         os.environ.pop("VISUAL_EXPLAIN_ASK_HOME", None)
         os.environ.pop("VISUAL_EXPLAIN_CLAUDE", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def dump_state(self):
+        """失敗したテストの、配信サーバーの様子を標準エラーに出す。
+
+        実際の事故: CI で、同時に起動した 3 つがどれも「起動できなかった」を返したが、理由がログに残らなかった。
+        行頭の LOG は、tests/run.sh が失敗の要約に拾う目印。"""
+        import socket
+        lines = ["%s（待ち受け先 127.0.0.1:%d）" % (self.id(), self.port)]
+        try:
+            probe = serve.ask_probe(self.conf)
+            lines.append("待ち受け先にいるもの: %s" % ("何もいない" if probe is None else "別の配信サーバー" if probe == "foreign"
+                                                else json.dumps(probe, ensure_ascii=False)))
+        except Exception as e:  # noqa: BLE001  調べている途中の失敗で、元の失敗を隠さない
+            lines.append("待ち受け先を確かめられなかった: %r" % e)
+        with socket.socket() as sock:
+            sock.settimeout(2)
+            lines.append("ポートへの接続: %s" % ("つながる" if sock.connect_ex(("127.0.0.1", self.port)) == 0 else "つながらない"))
+        for name in ("ask-server.json", "ask-server.log"):
+            path = os.path.join(self.home, name)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    body = f.read().splitlines()[-60:]
+            except OSError as e:
+                lines.append("%s: 読めない（%s）" % (name, e.strerror))
+                continue
+            lines.append("%s（%d 行）:" % (name, len(body)))
+            lines += ["  " + line for line in body]
+        sys.stderr.write("".join("LOG %s\n" % line for line in lines))
+        sys.stderr.flush()
 
     def test_resident_server_keeps_the_width_next_to_its_settings(self):
         self.assertTrue(serve.ensure_ask_server(self.home, self.conf))
