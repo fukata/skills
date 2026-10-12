@@ -2452,7 +2452,7 @@ def ask_config_main(args):
     label = {"open": "受け箱か質問の資料をブラウザで開いているときだけ、質問をページに出す",
              "always": "常に質問をページに出して待つ", "off": "使わない（いつもどおりターミナルで答える）"}
     effective = ask_effective_mode(conf)
-    print("AskUserQuestion の質問を資料のページで答える: %s（%s%s）" % (
+    print("エージェントの質問（AskUserQuestion・request_user_input）を資料のページで答える: %s（%s%s）" % (
         conf["mode"], label[effective], "。受け箱を開いたことがあるため" if conf["mode"] == "auto" and effective == "always"
         else "。受け箱を一度開くと、それ以降は常にページで待つ" if conf["mode"] == "auto" else ""))
     print("受け箱: %s/__qa/inbox?k=%s （開いておくと、質問が来たときにその資料を開く）" % (conf["public_url"], conf["token"]))
@@ -2509,7 +2509,7 @@ def main(argv=None):
     e = sub.add_parser("export", help="回答した質問を、資料の末尾の節に書き出す（ファイルを渡しても読めるように）")
     e.add_argument("material", help="資料のフォルダ、または資料の HTML")
     e.add_argument("--doc-name", default="explanation.html", help="資料の HTML のファイル名（フォルダを渡したとき）")
-    a = sub.add_parser("ask-config", help="AskUserQuestion の質問を資料のページで答える設定（引数なしで今の設定と受け箱の URL を表示）")
+    a = sub.add_parser("ask-config", help="エージェントの質問（AskUserQuestion・request_user_input）を資料のページで答える設定（引数なしで今の設定と受け箱の URL を表示）")
     on = a.add_mutually_exclusive_group()
     on.add_argument("--mode", choices=ASK_MODES,
                     help="auto: 受け箱を一度でも開いたら常にページで待ち、それまでは open と同じ（既定）。"

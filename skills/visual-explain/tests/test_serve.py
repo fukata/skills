@@ -1589,6 +1589,7 @@ class AskHookTest(ServeTestBase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("/__qa/inbox?k=", out.stdout)
         self.assertIn("動いている", out.stdout)
+        self.assertIn("エージェントの質問（AskUserQuestion・request_user_input）を資料のページで答える", out.stdout)
         conf = serve.load_ask_config(self.home)
         self.assertEqual(os.stat(os.path.join(self.home, "ask.json")).st_mode & 0o777, 0o600)
         self.assertEqual((conf["port"], conf["wait"], conf["build"]), (port, 120, "never"))

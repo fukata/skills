@@ -222,11 +222,18 @@ Claude 版の「読み取り・Web・MCP・作業用コピーと回答と `image
 2. Codex の Plan モードで `request_user_input` をページで答え、モデルが質問し直さずに続ける。
 3. Codex で作った資料のページの質問に、`codex exec fork` が答える。このマシンはサンドボックスが動かないので、`codex_guard.py` の経路を通る。拒むべきコマンド（書き込み・git）が拒まれることも見る。
 
+## 確かめた結果（2026-10-12、このマシン。Codex CLI 0.161.0、Claude Code 2.1.296）
+
+- Codex の `deny` の理由で届けた答え: `codex exec --enable default_mode_request_user_input` に受け箱の hook を付けて確かめた。モデルは「青、検証用のメモ」と答えを受け取り、質問し直さずに終えた（質問の登録は 1 回だけ）。機能フラグを付けないと、Default モードのモデルは request_user_input を呼ばず「Default モードのため使用できません」と返した（Plan モードでだけ使われる、の裏付け）。
+- 質問の途中のセッションの分岐: `codex exec fork` で選ぶための資料を作れた（`session: fork`、検査を通って本文を差し替え）。
+- ページの質問に Codex で答える: 資料を作った Codex のセッションを分岐して答え（`fork`）、2 問目は続き（`resume`）で答えた。このマシンはサンドボックスが動かない（`codex sandbox -- true` が bwrap のエラーで exit 1）ので、ガードの経路を通った。
+- ガード: 本物の Codex で、`git log -1`・`echo test > /tmp/…`（リダイレクト）・リポジトリのファイルへの apply_patch・許した場所の外への相対パスの apply_patch を拒み、`images/` の下への apply_patch は通した。apply_patch の `tool_input.command` のパスは絶対パスで届いた。
+- Claude Code: 本物の `claude -p` でページの質問に答えた（新しいセッション）。
+- `codex sandbox` での試し方: `codex sandbox -- true` の終了コードで判定する。
+
 ## 未確認（実装時に確かめる）
 
-- Codex の `deny` の理由で答えを届けたときのモデルの振る舞い（3節）
-- 質問の途中のセッションを `codex exec fork` で分岐できるか（3節）
-- Codex の hook の出力の `systemMessage` が利用者に表示されるか（3節）
-- `codex sandbox` での試し方（4節）
-- Codex の PreToolUse に渡る `tool_input` の形（4節）
+- Codex の hook の出力の `systemMessage` が利用者に表示されるか（3節。exec では確かめられない。TUI で確かめる）
+- Codex の TUI での一連の流れ: `/hooks` での信頼、Plan モードでモデルが request_user_input を呼ぶこと、待っている間の statusMessage の表示
+- サンドボックスが動く環境での permission profile（このマシンでは動かないため、コマンドの組み立てだけをテストで確かめた）
 - hook を 30 分以上待たせたときの Codex の振る舞い（timeout 7200 を指定する）
