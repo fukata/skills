@@ -22,16 +22,18 @@ if [ "$want_claude" = 0 ] && [ "$want_codex" = 0 ]; then
   echo "Claude Code（$CLAUDE_DIR）も Codex（$CODEX_DIR）も見つからない" >&2
   exit 1
 fi
-# zaicodev 版（plugin）と一緒に入れると、受け箱の hook が二重に動く
-if [ -f "$CLAUDE_DIR/settings.json" ] && python3 -I -c '
+# plugin 版の visual-explain と一緒に入れると、受け箱の hook が二重に動き、配信サーバーがポートを取り合う
+if [ -f "$CLAUDE_DIR/settings.json" ] && plugin="$(python3 -I -c '
 import json, sys
 try:
     d = json.load(open(sys.argv[1], encoding="utf-8"))
 except (OSError, ValueError):
     sys.exit(1)
-sys.exit(0 if (d.get("enabledPlugins") or {}).get("visual-explain@zaicodev") else 1)' "$CLAUDE_DIR/settings.json"; then
-  echo "zaicodev 版（visual-explain@zaicodev）が有効になっている。受け箱の hook が二重に動くので、先に外す:" >&2
-  echo "  /plugin uninstall visual-explain@zaicodev" >&2
+names = [k for k, v in (d.get("enabledPlugins") or {}).items() if v and k.split("@")[0] == "visual-explain"]
+print(names[0] if names else "")
+sys.exit(0 if names else 1)' "$CLAUDE_DIR/settings.json")"; then
+  echo "plugin 版の visual-explain（$plugin）が有効になっている。受け箱の hook が二重に動くので、先に外す:" >&2
+  echo "  /plugin uninstall $plugin" >&2
   exit 1
 fi
 if [ "$want_claude" = 1 ]; then

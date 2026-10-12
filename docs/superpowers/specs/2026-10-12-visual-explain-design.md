@@ -1,19 +1,18 @@
-# visual-explain 公開版の設計
+# visual-explain の設計（Claude Code と Codex 対応）
 
 ## 目的
 
-zaicodev/claude-code-plugins（private）の plugin「visual-explain」を、fukata/skills（public）から `npx skills` で誰でも入れられるスキルにする。Claude Code に加えて Codex CLI でも、資料作り・配信・ページからの質問・受け箱（エージェントの質問にページで答える仕組み）まで動くようにする。
+図解の HTML 資料を作って配信するスキル visual-explain を、fukata/skills から `npx skills` で誰でも入れられる形で提供する。Claude Code に加えて Codex CLI でも、資料作り・配信・ページからの質問・受け箱（エージェントの質問にページで答える仕組み）まで動くようにする。
 
 ### 決めたこと
 
 | 項目 | 決定 |
 | --- | --- |
-| 狙い | 社外でも使える公開版にする。Claude Code 以外のエージェントでも使えるようにする |
-| zaicodev 版との関係 | 両方を別々に保守する。公開版は zaicodev 版 0.18.1（commit `c7c7c99`）から分岐し、以後の変更は必要に応じて手で移す |
+| 狙い | 誰でも使えるようにする。Claude Code 以外のエージェントでも使えるようにする |
 | 対応範囲 | 受け箱まですべて |
 | 受け箱まで動かすエージェント | Claude Code、Codex CLI（0.161.0 で確認）。ほかのエージェントでも資料作り・検査・配信は動く |
 | 言語 | 日本語のまま（資料の本文は従来どおりユーザーの言語で書く） |
-| zaicodev 版との併用 | しない。名前は `visual-explain` のまま。setup.sh が zaicodev 版を見つけたら警告して止める |
+| plugin 版との併用 | しない。setup.sh が plugin 版の visual-explain を見つけたら警告して止める |
 | Codex で答えるときの権限 | サンドボックスが動けばサンドボックス、動かなければ子の codex だけに付ける PreToolUse hook で絞る |
 | 作り方 | エージェントの違いをアダプタ（`scripts/agents.py`）に閉じ込める（案A） |
 
@@ -22,7 +21,7 @@ zaicodev/claude-code-plugins（private）の plugin「visual-explain」を、fuk
 - Claude Code・Codex 以外のエージェントのページからの質問・受け箱
 - Codex の Default モードで `request_user_input` を使えるようにする機能フラグの変更
 - UI の多言語化
-- zaicodev 版の evals の移植（plugin 形式が前提で、社内の会話記録を含む）
+- plugin 形式の起動条件の評価（`claude plugin eval`）
 
 ## 1. 配置と導入
 
@@ -31,20 +30,20 @@ skills/visual-explain/
 ├── SKILL.md            # name / description / license: MIT
 ├── setup.sh            # hook を登録する（Claude Code と Codex）
 ├── teardown.sh         # 登録した hook を外す
-├── assets/             # 雛形・質問欄・受け箱・プロンプトの雛形（zaicodev 版から移植）
-├── references/         # viewing / qa / ask / orca / examples（同上）
+├── assets/             # 雛形・質問欄・受け箱・プロンプトの雛形
+├── references/         # viewing / qa / ask / orca / examples
 ├── scripts/
-│   ├── serve.py              # 配信・質問欄・受け箱（同上。エージェントの呼び出しをアダプタへ移す）
-│   ├── ask_hook.py           # 受け箱の hook（同上。Codex の入出力を足す）
-│   ├── check-explanation.py  # 資料の検査（同上）
-│   ├── agents.py             # 新規: Claude / Codex のアダプタ
-│   └── codex_guard.py        # 新規: サンドボックスが動かないときに子の codex を絞る hook
-└── tests/              # zaicodev 版の tests を移植し、Codex 分を足す
+│   ├── serve.py              # 配信・質問欄・受け箱（エージェントの呼び出しはアダプタを通す）
+│   ├── ask_hook.py           # 受け箱の hook（Claude Code と Codex の入出力）
+│   ├── check-explanation.py  # 資料の検査
+│   ├── agents.py             # Claude / Codex のアダプタ
+│   └── codex_guard.py        # 子の codex を絞る hook
+└── tests/
 ```
 
-- zaicodev 版の `.claude-plugin/plugin.json`、`hooks/hooks.json`、`evals/`、`__pycache__` は持ってこない。
+- plugin の `.claude-plugin/plugin.json`・`hooks/hooks.json` は置かない（hook は setup.sh が登録する）。`__pycache__` はコミットしない。
 - SKILL.md の frontmatter は `name`・`description`・`license` だけにする（`user-invocable`・`argument-hint` は Claude Code 固有なので外す）。description は 1,024 文字以内（Codex は一覧で 1,024 文字に切り詰める）。
-- SKILL.md・references の中のパスは `${CLAUDE_PLUGIN_ROOT}/skills/visual-explain/…` をやめ、「`<skill>` は この SKILL.md があるディレクトリ」と書く（orca-account-failover と同じ）。Codex は SKILL.md 内の相対パスを SKILL.md 基準で解決し、Claude Code はスキルを読み込むときにベースディレクトリを示す。
+- SKILL.md・references の中のパスは「`<skill>` は この SKILL.md があるディレクトリ」と書く（orca-account-failover と同じ）。Codex は SKILL.md 内の相対パスを SKILL.md 基準で解決し、Claude Code はスキルを読み込むときにベースディレクトリを示す。
 
 ### 導入
 
@@ -64,19 +63,19 @@ bash ~/.agents/skills/visual-explain/setup.sh     # 対象は自動判定。--cl
   - `PreToolUse`（matcher `request_user_input`）: `python3 -I <skill>/scripts/ask_hook.py --agent codex`（timeout 7200、同じ statusMessage）
   - Codex は信頼していない hook を黙って無視するので、最後に「Codex を開いて `/hooks` でこの hook を信頼する」と案内する。`config.toml` の `trusted_hash` は書かない。hook のコマンド文字列は固定にし、スキルを更新しても信頼し直しにならないようにする。
 - 何度実行しても重複しない（同じコマンドの項目があれば置き換える）。`jq` を使わず python3 で JSON を読み書きする（スキル全体の依存を python3 に揃える）。
-- zaicodev 版の plugin（`visual-explain@zaicodev`）が `settings.json` の `enabledPlugins` で有効なら、外すよう案内して止める（受け箱の hook が二重に動くため）。
+- plugin 版の visual-explain（`visual-explain@<marketplace>`）が `settings.json` の `enabledPlugins` で有効なら、外すよう案内して止める（受け箱の hook が二重に動くため）。
 - `teardown.sh` は、コマンドに `<skill>/scripts/ask_hook.py` を含む項目だけを外す。
 
 ### データの置き場
 
-- `${VISUAL_EXPLAIN_HOME:-${XDG_STATE_HOME:-~/.local/state}/visual-explain}`。zaicodev 版の `~/.claude/visual-explain/` から移す（Codex だけの利用者には `~/.claude` が無い）。
+- `${VISUAL_EXPLAIN_HOME:-${XDG_STATE_HOME:-~/.local/state}/visual-explain}`。`~/.claude` の下には置かない（Codex だけの利用者には `~/.claude` が無い）。
 - 受け箱の設定（`ask.json`）・合言葉・質問ごとの資料（`asks/`）・ログ・質問欄の幅（`viewer.json`）を置く。Claude と Codex のセッションは同じ受け箱・同じ配信サーバー（既定ポート 8770）を使う。
-- zaicodev 版の `VISUAL_EXPLAIN_ASK_HOME` も読む（テストと既存の上書きのため）。
+- `VISUAL_EXPLAIN_ASK_HOME` も読む（テストのため）。
 
 ### README
 
 - ルートの README の一覧に visual-explain を足す。
-- `skills/visual-explain/README.md` に、導入・使い方・依存・制約・分岐元（zaicodev 版 0.18.1、`c7c7c99`）を書く。zaicodev の marketplace の手順は書かない。
+- `skills/visual-explain/README.md` に、導入・使い方・依存・制約を書く。
 
 ## 2. アダプタ（`scripts/agents.py`）
 
@@ -194,27 +193,18 @@ Claude 版の「読み取り・Web・MCP・作業用コピーと回答と `image
 - シェルの文字列で判定するので、ツール単位で許す Claude 版より弱い。README と `references/qa.md` の安全の節に書く。
 - 子の codex には `VISUAL_EXPLAIN_ASK_CHILD=1` を付け、利用者の受け箱の hook が子で動かないようにする（現行どおり）。
 
-## 5. zaico 由来の除去と一般化
-
-- 例を一般の題材に置き換える。`references/examples.md` の「在庫クラウド」「在庫編集／一覧／詳細」「注文の確定から在庫の引当」、SKILL.md の「組織の中の拠点、拠点の中のユーザー」（→「組織の中の部署、部署の中のユーザー」）、README の「注文の確定から在庫の引当までどう流れるの？」。
-- `check-explanation.py` とテストのチケット番号の例 `PLG26-33` を `ABC-123` にする（検査の正規表現は変えない）。テストの文字列・MCP 名の例（「在庫の一覧に絞り込みを足して」「mackerel」）も一般のものにする。
-- zaicodev の private リポジトリの設計文書への参照（`references/qa.md` の「他のプラグインで使うとき」）は、この spec への参照に変える。
-- AskUserQuestion だけを前提にした書き方は「AskUserQuestion（Codex では request_user_input）」にする。Claude Docs・Artifact・docs スキルより優先する指示は Claude 向けだが害は無いので残す。
-- Orca・Tailscale の手順は任意の機能として残す（無い環境では従来どおり何もしない）。
-- 移植後に `zaico`・`zaicodev`・`拠点`・`在庫`・社内のチケット番号の形・社内 URL がスキルのディレクトリに残っていないことを grep で確かめる（README の分岐元の記載を除く）。
-
-## 6. テスト
+## 5. テスト
 
 ### 自動テスト（`bash skills/visual-explain/tests/run.sh`）
 
-- zaicodev 版の `tests/run.sh`・`tests/test_serve.py`・fixtures を移植し、パスを新しい配置に直す。
-- 足すもの:
+- `tests/run.sh` から、検査スクリプト・配信サーバー（`test_serve.py`）・下のテストをまとめて動かす。
+- Codex のためのテスト:
   - `tests/fixtures/fake_codex.py`: `codex exec --json [fork|resume] …`、`codex mcp list --json`、`codex sandbox` の代役（`fake_claude.py` と同じ作り）。
   - `agents.py`: 両エージェントのコマンドの組み立て、Codex のイベントの正規化、セッション情報（`state_5.sqlite` と rollout）、origin のエージェント判定。
   - 質問欄の回答を Codex（代役）で行う流れ: 分岐 → 続き → 失敗時の新しいセッション、途中経過、取り消し、サンドボックスの有無による引数の違い。
   - `ask_hook.py --agent codex`: 入力の正規化、登録、`deny` の出力の形、SessionStart で何も出力しないこと。
   - `codex_guard.py`: 許すコマンド・拒むコマンドの表、書き込み先の判定。
-  - `setup.sh` / `teardown.sh`: 一時的な HOME で、Claude の `settings.json` と Codex の `hooks.json` への登録・重複しないこと・既存の項目を壊さないこと・外せること・zaicodev 版の検出。
+  - `setup.sh` / `teardown.sh`: 一時的な HOME で、Claude の `settings.json` と Codex の `hooks.json` への登録・重複しないこと・既存の項目を壊さないこと・外せること・plugin 版の検出。
 
 ### 手で確かめること（このマシン）
 

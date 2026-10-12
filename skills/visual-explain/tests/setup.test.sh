@@ -59,9 +59,13 @@ fresh
 run setup.sh --codex >/dev/null 2>&1
 check "--codex なら Claude には足さない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
 fresh
-printf '{"enabledPlugins":{"visual-explain@zaicodev":true}}\n' > "$T/.claude/settings.json"
+printf '{"enabledPlugins":{"visual-explain@some-market":true}}\n' > "$T/.claude/settings.json"
 out="$(run setup.sh 2>&1)"; code=$?
-check "zaicodev 版が有効なら止める" "[ $code -ne 0 ] && grep -q 'visual-explain@zaicodev' <<<\"\$out\" && ! grep -q ask_hook.py '$T/.claude/settings.json' && ! grep -q ask_hook.py '$T/.codex/hooks.json'"
+check "plugin 版の visual-explain が有効なら止める" "[ $code -ne 0 ] && grep -q '/plugin uninstall visual-explain@some-market' <<<\"\$out\" && ! grep -q ask_hook.py '$T/.claude/settings.json' && ! grep -q ask_hook.py '$T/.codex/hooks.json'"
+fresh
+printf '{"enabledPlugins":{"visual-explain@some-market":false,"other@x":true}}\n' > "$T/.claude/settings.json"
+run setup.sh >/dev/null 2>&1
+check "無効の plugin 版・別の plugin では止めない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 1 ]"
 fresh
 out="$(run setup.sh --bogus 2>&1)"; code=$?
 check "知らない引数は使い方の誤り" "[ $code -eq 2 ]"

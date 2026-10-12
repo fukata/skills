@@ -16,7 +16,7 @@ bash ~/.agents/skills/visual-explain/setup.sh
 
 - `setup.sh` は、Claude Code の `~/.claude/settings.json` と Codex の `~/.codex/hooks.json` に hook を登録します（設定フォルダがあるものだけ。`--claude` / `--codex` で絞れます）。hook は、セッションの開始時に受け箱の配信サーバーを起動し、エージェントの質問をページに出します。
 - **Codex は、hook を信頼するまで動かしません。** `setup.sh` の後に Codex を開き、`/hooks` で visual-explain の 2 つの hook を信頼してください。
-- zaicodev/claude-code-plugins の visual-explain（plugin 版）を入れている場合は、先に外してください（`/plugin uninstall visual-explain@zaicodev`）。両方あると hook が二重に動き、受け箱の配信サーバーがポートを取り合います。`setup.sh` は plugin 版が有効なら止まります。
+- plugin 版の visual-explain を入れている場合は、先に外してください（`/plugin uninstall visual-explain@<marketplace>`）。両方あると hook が二重に動き、受け箱の配信サーバーがポートを取り合います。`setup.sh` は plugin 版が有効なら止まります。
 
 外すとき:
 
@@ -137,10 +137,6 @@ bash skills/visual-explain/tests/run.sh
 ```
 
 python3 と git が必須です。claude と codex は代役（`tests/fixtures/fake_claude.py`・`fake_codex.py`）を使います。ヘッドレス Chrome があれば、ブラウザでの検査とページの表示も確かめます。
-
-## 分岐元
-
-zaicodev/claude-code-plugins の visual-explain 0.18.1（commit `c7c7c99`）から分岐し、Claude Code と Codex の両方で動くようにしたものです。以後の変更は、必要に応じて手で移します。
 
 ## ライセンス
 
