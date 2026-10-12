@@ -2,6 +2,7 @@
 # visual-explain スキルの一括テスト。python3 と git は必須、
 # ヘッドレス Chrome があれば図のはみ出し・狭い幅の検査も確かめる。
 #   usage: bash skills/visual-explain/tests/run.sh
+#   VISUAL_EXPLAIN_TEST_LOGS=<フォルダ> を付けると、失敗したときにテストの出力の全文をそこへ残す
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 C="python3 -I $HERE/../scripts/check-explanation.py"
@@ -226,7 +227,7 @@ echo "== 配信サーバー（serve.py。claude は代役。Chrome があれば�
 if python3 -I "$HERE/test_serve.py" >"$TMP/serve.log" 2>&1; then
   ok "serve.py のテスト（$(grep -Eo 'Ran [0-9]+ tests' "$TMP/serve.log")$(grep -Eo 'skipped=[0-9]+' "$TMP/serve.log" | sed 's/^/, /')）"
 else
-  ng "serve.py のテスト"; grep -E '^(FAIL|ERROR|Traceback|AssertionError)|Error' "$TMP/serve.log" | head -20
+  ng "serve.py のテスト"; grep -E '^(FAIL|ERROR|Traceback|AssertionError|LOG )|Error' "$TMP/serve.log" | head -120
 fi
 
 echo "== setup.sh / teardown.sh"
@@ -236,4 +237,9 @@ else
   ng "setup.sh / teardown.sh のテスト"; grep FAIL "$TMP/setup.log"
 fi
 
+# 失敗したときは、要約に出ない全文（トレースバックなど）を残せる。CI はこれを成果物として保存する
+if [ "$fail" != 0 ] && [ -n "${VISUAL_EXPLAIN_TEST_LOGS:-}" ]; then
+  mkdir -p "$VISUAL_EXPLAIN_TEST_LOGS" && cp "$TMP"/*.log "$VISUAL_EXPLAIN_TEST_LOGS"/ 2>/dev/null
+  echo "テストの出力の全文: $VISUAL_EXPLAIN_TEST_LOGS"
+fi
 [ "$fail" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }

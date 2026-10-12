@@ -29,3 +29,14 @@ jobs:
           npx -y playwright install --with-deps chromium-headless-shell
       - name: すべてのスキルのテスト
         run: bash test.sh
+        env:
+          VISUAL_EXPLAIN_TEST_LOGS: ${{ runner.temp }}/test-logs
+      # 要約に出ないトレースバックや配信サーバーのログを、失敗の調査のために残す
+      - name: 失敗したテストの出力を保存する
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: ${{ runner.temp }}/test-logs
+          if-no-files-found: ignore
+          retention-days: 14
