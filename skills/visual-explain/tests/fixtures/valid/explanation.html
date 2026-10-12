@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>検査用の資料</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    main { max-width: 900px; margin: auto; padding: 16px; }
+    nav a { margin-right: 12px; }
+    .scroll { overflow-x: auto; }
+    .scroll svg { display: block; width: 100%; min-width: 600px; height: auto; }
+    @media print { .scroll { overflow: visible; } .scroll svg { min-width: 0; } }
+  </style>
+</head>
+<body>
+<main>
+  <nav><a href="#flow">流れ</a><a href="#refs">根拠</a></nav>
+  <section id="context">
+    <h2>前提</h2>
+    <p>月額プランの更新と、売上の集計がいつ動くかを説明する。集計の時刻を変える相談のために作った。</p>
+  </section>
+  <section id="flow">
+    <h2>流れ</h2>
+    <p class="key">更新は毎月1日、集計は翌月1日に動く。</p>
+    <figure>
+      <div class="scroll">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 120" width="600" height="120" role="img" aria-labelledby="t1">
+          <title id="t1">更新と集計</title>
+          <rect x="10" y="20" width="250" height="60" rx="8" fill="#eef" stroke="#33a"/>
+          <rect x="340" y="20" width="250" height="60" rx="8" fill="#eef" stroke="#33a"/>
+          <path d="M260 50 H334" stroke="#33a"/>
+          <text x="25" y="55" font-size="14">毎月1日に更新する</text>
+          <text x="355" y="55" font-size="14">翌月1日に集計する</text>
+        </svg>
+      </div>
+      <figcaption>図1: 更新と集計</figcaption>
+    </figure>
+    <figure>
+      <img src="images/diagram.svg" alt="補足の図" width="200" height="80">
+      <figcaption>図2: 補足</figcaption>
+    </figure>
+  </section>
+  <section id="refs">
+    <h2>根拠</h2>
+    <ul>
+      <li>猶予は <code>GRACE_DAYS</code>（<code>app/models/plan.rb:3</code>）。</li>
+      <li><code>Plan#renew_plan</code> は <code>charge_monthly_fee</code> を呼ぶ（<code>plan.rb:5-7</code>）。</li>
+      <li>集計は <code>billing:collect_monthly_sales</code>（<code>lib/tasks/billing.rake:2-4</code>）から <code>Billing::CollectService</code> を呼ぶ。</li>
+      <li>決済代行の gem は <code>Gemfile:2</code>。</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>
