@@ -45,7 +45,7 @@ test.sh               すべてのスキルの tests/run.sh を実行する
 
 - `skills/<名前>/tests/run.sh` で、そのスキルのテストがすべて動くようにする。失敗したら 0 以外で終わる。
 - 実際の設定・アカウント・外部のサービスに触れない（設定フォルダは一時ディレクトリに向け、エージェントの CLI は代役を使う）。
-- 変更したら `bash test.sh` を通す。GitHub Actions（`.github/workflows/test.yml`）も同じコマンドを実行する。
+- 変更したら `bash test.sh` を通す。GitHub Actions（`.github/workflows/test.yml`）も同じコマンドを実行する。ブラウザを使うテストは、CI では chrome-headless-shell で動かす。
 
 ## 文章とコミット
 
