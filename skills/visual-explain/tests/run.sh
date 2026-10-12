@@ -226,4 +226,11 @@ else
   ng "serve.py のテスト"; grep -E '^(FAIL|ERROR|Traceback|AssertionError)|Error' "$TMP/serve.log" | head -20
 fi
 
+echo "== setup.sh / teardown.sh"
+if bash "$HERE/setup.test.sh" >"$TMP/setup.log" 2>&1; then
+  ok "setup.sh / teardown.sh のテスト（$(grep -c '^  ok' "$TMP/setup.log") 件）"
+else
+  ng "setup.sh / teardown.sh のテスト"; grep FAIL "$TMP/setup.log"
+fi
+
 [ "$fail" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }
