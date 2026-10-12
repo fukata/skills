@@ -20,15 +20,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      # visual-explain のブラウザを使うテストは chrome-headless-shell で動かす。
-      # ランナーに入っている通常の Chrome では、図の計測とページの取り出しができない
+      # visual-explain のブラウザを使うテストのため。検査スクリプトは Playwright のキャッシュの chrome-headless-shell を
+      # 先に探す。図の文字幅を測るテストは、日本語フォントが無いと結果が変わって失敗する
       - name: ヘッドレス Chrome と日本語フォントを入れる
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq fonts-noto-cjk
           npx -y playwright install --with-deps chromium-headless-shell
-          chrome="$(ls -d "$HOME"/.cache/ms-playwright/chromium_headless_shell-*/*/chrome-headless-shell | tail -n 1)"
-          test -x "$chrome"
-          echo "VISUAL_EXPLAIN_CHROME=$chrome" >> "$GITHUB_ENV"
       - name: すべてのスキルのテスト
         run: bash test.sh

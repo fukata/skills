@@ -29,7 +29,7 @@ npx skills remove -g visual-explain
 ## 依存
 
 - **Python 3**（必須）。配信サーバー・検査スクリプト・hook は標準ライブラリだけで動きます。
-- **ヘッドレス Chrome**（任意）。検査スクリプトが、図の文字のはみ出し・狭い幅・印刷での欠けを測ります。無ければその検査だけ飛ばします（`npx playwright install chromium-headless-shell` などで入ります）。
+- **ヘッドレス Chrome**（任意）。検査スクリプトが、図の文字のはみ出し・狭い幅・印刷での欠けを測ります。無ければその検査だけ飛ばします（`npx playwright install chromium-headless-shell` などで入ります）。chrome-headless-shell、通常の Chrome・Chromium の順に探し、起動してページを取り出せた最初のものを使います（`--chrome` か環境変数 `VISUAL_EXPLAIN_CHROME` で指定もできます）。
 - **Tailscale**（任意）。別の端末から資料を開くときの経路の一つです。無ければ SSH ポート転送で開けます。
 
 ## 使い方
@@ -136,7 +136,7 @@ visual-explain-<topic>/
 bash skills/visual-explain/tests/run.sh
 ```
 
-python3 と git が必須です。claude と codex は代役（`tests/fixtures/fake_claude.py`・`fake_codex.py`）を使います。ヘッドレス Chrome があれば、ブラウザでの検査とページの表示も確かめます。
+python3 と git が必須です。claude と codex は代役（`tests/fixtures/fake_claude.py`・`fake_codex.py`）を使います。ヘッドレス Chrome があれば、ブラウザでの検査とページの表示も確かめます。ブラウザを使うテストは図の文字幅を測るので、日本語フォントが入っていないと失敗します。
 
 ## ライセンス
 
