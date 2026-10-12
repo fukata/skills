@@ -1,0 +1,152 @@
+/* visual-explain の質問欄（serve.py が配信時にだけ差し込む）。資料の雛形の色に合わせ、名前は ve-qa- で始める */
+.ve-qa { --qa-ink: #203044; --qa-muted: #516176; --qa-line: #d9e0e8; --qa-key: #1d5f9e; --qa-key-bg: #e6f0fa;
+         --qa-warn: #9a5200; --qa-warn-bg: #fff3df; --qa-bg: #ffffff; --qa-soft: #f3f5f8;
+         font-family: system-ui, sans-serif; color: var(--qa-ink); font-size: 15px; line-height: 1.7; }
+.ve-qa *, .ve-qa *::before, .ve-qa *::after { box-sizing: border-box; }
+.ve-qa-toggle { position: fixed; right: 20px; bottom: 20px; z-index: 2147483000; display: inline-flex; align-items: center; gap: 8px;
+                padding: 12px 18px; border: 0; border-radius: 999px; background: var(--qa-key); color: #fff;
+                font: inherit; font-weight: 700; box-shadow: 0 4px 16px rgba(20, 40, 70, .25); cursor: pointer; }
+.ve-qa-toggle:focus-visible, .ve-qa button:focus-visible, .ve-qa textarea:focus-visible, .ve-qa a:focus-visible {
+  outline: 3px solid #e0a100; outline-offset: 2px; }
+.ve-qa-badge { padding: 0 8px; border-radius: 999px; background: #fff; color: var(--qa-key); font-size: .8rem; }
+body.ve-qa-open .ve-qa-toggle { display: none; }
+.ve-qa-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 2147483001; width: min(var(--ve-qa-width, 440px), 100vw);
+               display: flex; flex-direction: column; background: var(--qa-bg); border-left: 1px solid var(--qa-line);
+               box-shadow: -6px 0 24px rgba(20, 40, 70, .15); }
+.ve-qa-panel[hidden] { display: none; }
+.ve-qa-head { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--qa-line); }
+.ve-qa-head h2 { flex: 1; margin: 0; font-size: 1.1rem; }
+.ve-qa-detach { height: 36px; padding: 0 12px; border: 1px solid var(--qa-line); border-radius: 8px; background: var(--qa-bg);
+                color: var(--qa-ink); font: inherit; font-size: .85rem; cursor: pointer; }
+.ve-qa-close { border: 1px solid var(--qa-line); background: var(--qa-bg); color: var(--qa-ink); border-radius: 8px;
+               width: 36px; height: 36px; font-size: 1.2rem; cursor: pointer; }
+.ve-qa-note, .ve-qa-empty { margin: 10px 18px 0; color: var(--qa-muted); font-size: .85rem; }
+.ve-qa-notice { margin: 10px 18px 0; padding: 8px 12px; border-left: 4px solid var(--qa-warn); background: var(--qa-warn-bg); font-size: .9rem; }
+.ve-qa-notice[hidden], .ve-qa-empty[hidden], .ve-qa-quote[hidden], .ve-qa-toast[hidden], .ve-qa-badge[hidden] { display: none; }
+.ve-qa-list { flex: 1; overflow-y: auto; margin: 0; padding: 12px 18px; list-style: none; }
+.ve-qa-item { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--qa-line); border-radius: 10px; background: var(--qa-bg); }
+.ve-qa-item[data-status="failed"] { border-color: var(--qa-warn); }
+.ve-qa-item[data-status="canceled"] { opacity: .7; }
+.ve-qa-statusrow { display: flex; align-items: center; gap: 8px; }
+.ve-qa-statusrow .ve-qa-status { flex: 1; }
+.ve-qa-cancel { padding: 2px 10px; }
+.ve-qa-cancel:disabled { opacity: .55; cursor: not-allowed; }
+/* claude の途中経過。作成中は直近の 3 つ、回答後は畳んで全部 */
+.ve-qa-progress { margin: 2px 0 4px; color: var(--qa-muted); font-size: .8rem; }
+.ve-qa-progress summary { cursor: pointer; }
+.ve-qa-steps { margin: 4px 0; padding-left: 1.4em; }
+.ve-qa-steps li { margin: 1px 0; overflow-wrap: anywhere; }
+.ve-qa-step-now { color: var(--qa-ink); font-weight: 700; }
+.ve-qa-tools { display: flex; justify-content: flex-end; padding: 6px 18px; border-top: 1px solid var(--qa-line); }
+.ve-qa-tools[hidden] { display: none; }
+.ve-qa-export { padding: 4px 12px; }
+.ve-qa-export:disabled { opacity: .55; cursor: not-allowed; }
+.ve-qa-q p { margin: 4px 0; white-space: pre-wrap; }
+.ve-qa-meta, .ve-qa-status { color: var(--qa-muted); font-size: .8rem; margin: 4px 0; }
+.ve-qa-item[data-status="answering"] .ve-qa-status::before { content: "● "; color: var(--qa-key); }
+.ve-qa-tag { display: inline-block; padding: 0 8px; border-radius: 4px; font-size: .75rem; font-weight: 700;
+             background: var(--qa-soft); border: 1px solid var(--qa-line); }
+.ve-qa-a { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--qa-line); overflow-wrap: anywhere; }
+.ve-qa-a .ve-qa-tag { background: var(--qa-key); color: #fff; border-color: var(--qa-key); }
+.ve-qa-a p { margin: 6px 0 10px; }
+.ve-qa-a h3, .ve-qa-a h4 { font-size: 1rem; margin: 12px 0 4px; }
+.ve-qa-a pre { white-space: pre-wrap; padding: 10px; background: var(--qa-soft); border-radius: 6px; font-size: .85rem; }
+.ve-qa-a code { font-family: ui-monospace, monospace; font-size: .9em; }
+.ve-qa-a table { border-collapse: collapse; width: auto; max-width: 100%; font-size: .85rem; }
+.ve-qa-a th, .ve-qa-a td { border-bottom: 1px solid var(--qa-line); padding: 6px; text-align: left; vertical-align: top; }
+/* 回答の図は本来の大きさ（width・height）まで。質問欄を広げても拡大しすぎない。width の無い図は 720px まで */
+.ve-qa-a svg { display: block; max-width: 100%; height: auto; margin: 8px 0; }
+.ve-qa-a svg:not([width]) { width: 100%; max-width: 720px; }
+.ve-qa-a img { max-width: 100%; height: auto; }
+.ve-qa-a figure { margin: 8px 0; }
+.ve-qa-a figcaption { color: var(--qa-muted); font-size: .8rem; }
+.ve-qa-a .qa-changed { padding: 6px 10px; background: var(--qa-key-bg); border-left: 4px solid var(--qa-key); }
+.ve-qa-fail { margin: 6px 0 0; color: var(--qa-warn); font-size: .85rem; white-space: pre-wrap; }
+.ve-qa-doc { margin: 8px 0 0; padding: 6px 10px; border-left: 4px solid var(--qa-key); background: var(--qa-key-bg); font-size: .85rem; }
+.ve-qa-doc-warn { border-left-color: var(--qa-warn); background: var(--qa-warn-bg); }
+.ve-qa-doc p { margin: 4px 0; font-family: ui-monospace, monospace; font-size: .8rem; }
+.ve-qa-form { padding: 12px 18px 16px; border-top: 1px solid var(--qa-line); background: var(--qa-soft); }
+.ve-qa-quote { display: flex; gap: 6px; align-items: baseline; margin-bottom: 6px; font-size: .8rem; color: var(--qa-muted); }
+.ve-qa-quote q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--qa-ink); }
+.ve-qa-quote button, .ve-qa-link { border: 1px solid var(--qa-line); background: var(--qa-bg); color: var(--qa-ink);
+                                   border-radius: 6px; font: inherit; font-size: .8rem; cursor: pointer; }
+.ve-qa-label { display: block; font-weight: 700; font-size: .85rem; margin-bottom: 4px; }
+.ve-qa-where { font-weight: 400; color: var(--qa-muted); }
+.ve-qa-form textarea { width: 100%; min-height: 72px; padding: 8px 10px; border: 1px solid var(--qa-line); border-radius: 8px;
+                       font: inherit; resize: vertical; background: var(--qa-bg); color: var(--qa-ink); }
+.ve-qa-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 8px; }
+.ve-qa-error { flex: 1; color: var(--qa-warn); font-size: .8rem; }
+.ve-qa-send { padding: 8px 20px; border: 0; border-radius: 8px; background: var(--qa-key); color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
+.ve-qa-send:disabled, .ve-qa-form textarea:disabled { opacity: .55; cursor: not-allowed; }
+.ve-qa-toast { position: fixed; left: 20px; bottom: 20px; z-index: 2147483002; max-width: min(480px, calc(100vw - 40px));
+               padding: 12px 16px; border-radius: 10px; background: var(--qa-ink); color: #fff; box-shadow: 0 4px 16px rgba(20, 40, 70, .3); }
+.ve-qa-toast a { color: #cfe3ff; }
+.ve-qa-toast .ve-qa-link { margin-left: 8px; }
+.ve-qa-changed { outline: 3px solid #e0a100; outline-offset: 4px; }
+.ve-qa-changed-label { display: inline-block; margin: 0 0 8px; padding: 2px 10px; border-radius: 4px; background: #e0a100;
+                       color: #1c1400; font: 700 .8rem/1.6 system-ui, sans-serif; }
+/* Claude Code からの質問（AskUserQuestion）。質問欄の上に出す */
+.ve-qa-ask { margin: 10px 18px 0; padding: 12px 14px; max-height: 65vh; overflow-y: auto; border: 2px solid var(--qa-key);
+             border-radius: 10px; background: var(--qa-key-bg); }
+.ve-qa-ask[hidden] { display: none; }
+.ve-qa-ask:not([data-status="waiting"]) { border-width: 1px; border-color: var(--qa-line); background: var(--qa-soft); }
+.ve-qa-ask h3 { margin: 0; font-size: 1rem; }
+.ve-qa-note-inline { margin: 4px 0 8px; font-size: .85rem; }
+.ve-qa-ask-q { margin: 10px 0; padding: 8px 10px; border: 1px solid var(--qa-line); border-radius: 8px; background: var(--qa-bg); }
+.ve-qa-ask-q legend { padding: 0 4px; font-weight: 700; }
+.ve-qa-opt { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: start; margin: 6px 0; }
+.ve-qa-opt > input[type="radio"], .ve-qa-opt > input[type="checkbox"] { margin-top: 6px; }
+.ve-qa-opt label { cursor: pointer; }
+.ve-qa-opt label span { display: block; color: var(--qa-muted); font-size: .85rem; }
+.ve-qa-opt-preview, .ve-qa-ask-other { grid-column: 2; }
+.ve-qa-opt-preview pre { margin: 4px 0; padding: 8px; overflow-x: auto; background: var(--qa-soft); border-radius: 6px; font-size: .8rem; }
+.ve-qa-ask-other { width: 100%; padding: 4px 8px; border: 1px solid var(--qa-line); border-radius: 6px; font: inherit; }
+.ve-qa-ask-notes { margin: 6px 0 0; font-size: .85rem; }
+.ve-qa-ask-notes textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--qa-line); border-radius: 6px; font: inherit; }
+.ve-qa-ask-answers { display: grid; grid-template-columns: minmax(5em, max-content) 1fr; gap: 2px 12px; margin: 8px 0 0; font-size: .9rem; }
+.ve-qa-ask-answers dt { font-weight: 700; }
+.ve-qa-ask-answers dd { margin: 0; }
+/* ほかに答えを待っている質問と、知らせ方の切り替え */
+.ve-qa-ask-others { margin: 8px 18px 0; padding: 8px 12px; border: 1px solid var(--qa-line); border-radius: 8px;
+                    background: var(--qa-warn-bg); font-size: .85rem; }
+.ve-qa-ask-others[hidden] { display: none; }
+.ve-qa-ask-others-title { margin: 0 0 4px; font-weight: 700; color: var(--qa-warn); }
+.ve-qa-ask-others ul { margin: 0 0 6px; padding-left: 1.2em; }
+.ve-qa-ask-others li { margin: 2px 0; }
+.ve-qa-alerts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; color: var(--qa-muted); font-size: .85rem; }
+.ve-qa-ask-others:not(:has(.ve-qa-ask-others-title)) { background: var(--qa-soft); }
+/* 受け箱（/__qa/inbox） */
+body.ve-qa-inbox-page { margin: 0; background: #f3f5f8; }
+.ve-qa-inbox { max-width: 760px; margin: auto; padding: 32px 20px; }
+.ve-qa-inbox h1 { font-size: 1.4rem; margin: 0 0 8px; }
+.ve-qa-inbox-list { margin: 16px 0; padding: 0; list-style: none; }
+.ve-qa-inbox-list li { margin: 0 0 10px; padding: 12px 14px; border: 1px solid var(--qa-line); border-radius: 10px; background: var(--qa-bg); }
+.ve-qa-inbox-list li[data-status="waiting"] { border: 2px solid var(--qa-key); }
+.ve-qa-inbox-list a { font-weight: 700; color: var(--qa-key); }
+/* 左端のつまみ。ドラッグ・← → で幅を変える */
+.ve-qa-resize { position: absolute; top: 0; bottom: 0; left: -5px; width: 10px; cursor: col-resize; touch-action: none; z-index: 1; }
+.ve-qa-resize::after { content: ""; position: absolute; top: 50%; left: 3px; width: 4px; height: 48px; margin-top: -24px;
+                       border-radius: 2px; background: var(--qa-line); }
+.ve-qa-resize:hover::after, .ve-qa-resize:focus-visible::after, body.ve-qa-resizing .ve-qa-resize::after { background: var(--qa-key); }
+.ve-qa-resize:focus-visible { outline: 3px solid #e0a100; outline-offset: -2px; }
+body.ve-qa-resizing { cursor: col-resize; user-select: none; -webkit-user-select: none; }
+/* 資料の幅が十分残るときは、質問欄の幅だけ資料を左に寄せる（qa.js が ve-qa-push を付ける） */
+body.ve-qa-open.ve-qa-push { padding-right: var(--ve-qa-width, 440px); }
+/* 資料の図は本来の大きさ（qa.js が古い資料の図にも viewBox から width・height を書く）まで。狭いときは縮む */
+.diagram svg[width] { width: auto; max-width: 100%; height: auto; }
+/* 資料の目次で、読んでいる節の項目（qa.js が aria-current を付ける）。目次の見た目を持たない古い資料向けの最低限 */
+nav a[aria-current="true"] { font-weight: 700; }
+/* 別ウィンドウ（/__qa/panel）では、質問欄をウィンドウいっぱいに出す */
+body.ve-qa-window { margin: 0; background: #fff; }
+.ve-qa-standalone .ve-qa-panel { position: static; width: auto; height: 100vh; border: 0; border-radius: 0; box-shadow: none; }
+@media (max-width: 600px) {
+  .ve-qa-resize { display: none; }
+  .ve-qa:not(.ve-qa-standalone) .ve-qa-panel { top: auto; width: 100vw; height: 85vh; border-left: 0; border-top: 1px solid var(--qa-line); border-radius: 14px 14px 0 0; }
+  .ve-qa-toggle { right: 12px; bottom: 12px; }
+  .ve-qa-toast { left: 12px; bottom: 72px; }
+}
+@media print {
+  #ve-qa-root, .ve-qa-changed-label { display: none !important; }
+  body.ve-qa-open { padding-right: 0; }
+  .ve-qa-changed { outline: 0; }
+}
