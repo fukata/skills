@@ -17,7 +17,7 @@ g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 
 POLICY = {"write_files": ["/out/t/explanation.qa-draft.html", "/out/t/qa/answers/q1.html"], "write_dirs": ["/out/t/images"],
-          "commands": [["python3", "-I", "/s/check-explanation.py", "/out/t/explanation.qa-draft.html"]]}
+          "commands": [["python3", "-I", "/s/check-explanation.py", "/out/t/explanation.qa-draft.html"]], "mcp": True}
 
 
 class BashTest(unittest.TestCase):
@@ -31,7 +31,7 @@ class BashTest(unittest.TestCase):
         for cmd in ("cat /out/t/explanation.html", "sed -n '1,80p' app/models/plan.rb", "rg -n 'a|b' app",
                     "grep -rn GRACE_DAYS . | head -20", "find app -name '*.rb'", "ls -la", "wc -l a b", "nl -ba x",
                     "head -c 100 x", "tail -n 5 x", "jq . x.json", "stat x", "rg 'x > y' app", 'grep -n "a b" x',
-                    "sed -n '/error/p' log"):
+                    "sed -n '/error/p' log", "sed -n '120,$p' a.rb", "ls app/*.rb", "cat 資料.html"):
             self.allowed(cmd)
 
     def test_the_exact_check_command(self):
@@ -46,7 +46,14 @@ class BashTest(unittest.TestCase):
                     "cat `echo a`", "cat a &", "cat <(rm b)", "cat a\nrm b", "bash -c 'cat a'", "env rm a",
                     "awk 'BEGIN{system(\"rm a\")}'", "find . -fprint /tmp/x", "cat a | sh", "rg --pre rm x",
                     "rg --pre=rm x", "sort -o x a", 'cat "$(rm b)"', 'cat "`rm b`"', 'cat "$HOME"', "tree -o x",
-                    "file -C x", "/tmp/x/cat a", "FOO=1 cat a", "cat a\\ b"):
+                    "file -C x", "/tmp/x/cat a", "FOO=1 cat a", "cat a\\ b",
+                    # sed は「-n 範囲p ファイル」の形だけ（--expression・-e・-f で渡すスクリプトは調べられない）
+                    "sed -n --expression=1p x", "sed -n -e1p x", "sed -n -e 1p x", "sed -n -f images/s.sed x",
+                    "sed -n --file=s.sed x", "sed -ne 1p x", "sed -n '1,80p;w x' a", "sed --sandbox -n 1p x",
+                    # zsh のグロブ修飾子・波括弧・コメントなど、引用符の外の記号
+                    "ls a(b)", "ls *(e:x:)", "cat {a,b}", "cat a # b", "cat [ab]", "cat a!", "rg --hostname-bin=x y",
+                    # 改行で区切った検査のコマンド
+                    "python3 -I /s/check-explanation.py\n/out/t/explanation.qa-draft.html"):
             self.denied(cmd)
 
     def test_unparsable_is_denied(self):
@@ -67,6 +74,25 @@ class PatchTest(unittest.TestCase):
                     "*** Begin Patch\n*** Add File: /out/t/images/../x.html\n+x\n*** End Patch\n",
                     "*** Begin Patch\n*** End Patch\n", None):
             self.assertIsNotNone(g.check_patch(bad, "/repo", POLICY), bad)
+
+    def test_headers_are_read_like_codex_reads_them(self):
+        # Codex は見出しの行の前後の空白を除いて読む
+        for bad in ("*** Begin Patch\n*** Update File: /out/t/explanation.qa-draft.html\n@@\n-a\n+b\n  *** Add File: /etc/x\n+x\n*** End Patch\n",
+                    "*** Begin Patch\n *** Update File: /repo/app.rb\n@@\n-a\n+b\n*** End Patch\n",
+                    "*** Begin Patch\n*** Frobnicate File: /x\n*** End Patch\n"):
+            self.assertIsNotNone(g.check_patch(bad, "/repo", POLICY), bad)
+        ok = "  *** Begin Patch\n*** Add File: /out/t/images/a.svg\n+<svg/>\n*** End of File\n*** End Patch  \n"
+        self.assertIsNone(g.check_patch(ok, "/repo", POLICY))
+
+    def test_symlinks_out_of_the_allowed_dirs(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, tmp)
+        os.makedirs(os.path.join(tmp, "t", "images"))
+        os.makedirs(os.path.join(tmp, "elsewhere"))
+        os.symlink(os.path.join(tmp, "elsewhere"), os.path.join(tmp, "t", "images", "link"))
+        policy = {"write_files": [], "write_dirs": [os.path.join(tmp, "t", "images")], "commands": []}
+        patch = "*** Begin Patch\n*** Add File: %s/t/images/link/x.html\n+x\n*** End Patch\n" % tmp
+        self.assertIsNotNone(g.check_patch(patch, "/", policy))
 
     def test_relative_paths_resolve_from_cwd(self):
         rel = "*** Begin Patch\n*** Update File: explanation.qa-draft.html\n@@\n-a\n+b\n*** End Patch\n"
@@ -94,8 +120,19 @@ class HookTest(unittest.TestCase):
         bad = self.hook({"tool_name": "apply_patch", "cwd": "/repo",
                          "tool_input": {"command": "*** Begin Patch\n*** Add File: x\n+x\n*** End Patch\n"}})
         self.assertEqual(json.loads(bad.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
-        other = self.hook({"tool_name": "mcp__github__get_issue", "tool_input": {}, "cwd": "/repo"})
-        self.assertEqual(other.stdout, "")
+        for tool in ("mcp__github__get_issue", "update_plan", "view_image"):
+            self.assertEqual(self.hook({"tool_name": tool, "tool_input": {}, "cwd": "/repo"}).stdout, "", tool)
+
+    def test_unknown_tools_are_denied(self):
+        # コードを動かせるツール（コードモード・サブエージェントなど）は、許したもの以外すべて拒む
+        for tool in ("exec", "spawn_agent", "js_repl", "browser_use", "shell", "local_shell", "Write"):
+            out = self.hook({"tool_name": tool, "tool_input": {}, "cwd": "/repo"}).stdout
+            self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny", tool)
+
+    def test_mcp_is_denied_when_local_only(self):
+        out = self.hook({"tool_name": "mcp__github__get_issue", "tool_input": {}, "cwd": "/repo"},
+                        policy=dict(POLICY, mcp=False)).stdout
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_broken_input_is_denied(self):
         res = subprocess.run([sys.executable, "-I", GUARD, "--policy", "/nonexistent"], input="{}", capture_output=True,

@@ -31,6 +31,26 @@ check "Codex の /hooks での信頼を案内する" "grep -q '/hooks' <<<\"\$ou
 run setup.sh >/dev/null 2>&1
 check "2 回実行しても重複しない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 1 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
 
+echo "== 再実行・別のパス・リンク"
+fresh
+run setup.sh >/dev/null 2>&1
+# 後ろにほかのツールの hook がある（Codex の信頼はグループの番号で記録されるので、位置を変えない）
+python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["hooks"]["PreToolUse"].append({"hooks":[{"type":"command","command":"echo later"}]}); json.dump(d,open(p,"w"))' "$T/.codex/hooks.json"
+run setup.sh >/dev/null 2>&1
+check "再実行しても同じ位置で置き換える" "python3 -c 'import json; g=json.load(open(\"$T/.codex/hooks.json\"))[\"hooks\"][\"PreToolUse\"]; assert len(g)==2 and \"ask_hook.py\" in g[0][\"hooks\"][0][\"command\"] and g[1][\"hooks\"][0][\"command\"]==\"echo later\"'"
+ln -s "$SKILL" "$ROOT/link-$$"
+env -u CLAUDE_CONFIG_DIR -u CODEX_HOME HOME="$T" bash "$ROOT/link-$$/setup.sh" >/dev/null 2>&1
+check "別のパス（リンク）から実行しても二重にしない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 1 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
+fresh
+mv "$T/.claude/settings.json" "$T/dotfiles-settings.json"; ln -s "$T/dotfiles-settings.json" "$T/.claude/settings.json"; chmod 600 "$T/dotfiles-settings.json"
+run setup.sh >/dev/null 2>&1
+check "リンクの settings.json はリンクのまま、リンク先を書き換える" "[ -L '$T/.claude/settings.json' ] && grep -q ask_hook.py '$T/dotfiles-settings.json'"
+check "ファイルの権限を保つ" "[ \$(stat -c %a '$T/dotfiles-settings.json') = 600 ]"
+fresh
+printf '{ broken json\n' > "$T/.codex/hooks.json"
+out="$(run setup.sh 2>&1)"; code=$?
+check "壊れた JSON は書き換えず、分かる文で止める" "[ $code -ne 0 ] && grep -q 'JSON' <<<\"\$out\" && ! grep -q Traceback <<<\"\$out\" && grep -q 'broken json' '$T/.codex/hooks.json'"
+
 echo "== 対象の絞り込みと検出"
 fresh; rm -rf "$T/.codex"
 run setup.sh >/dev/null 2>&1

@@ -82,11 +82,12 @@ python3 <skill>/scripts/serve.py origin <資料フォルダ> --cwd <このセッ
 - 合言葉はページを開いた後にアドレス欄から消える。
 - 待ち受けるアドレスは今までの配信と同じ（[viewing.md](viewing.md)）。`0.0.0.0` では起動しない。
 - Codex（`codex exec`）は、Claude Code のようにツール単位では許せないので、次のように絞る。
-  - 配信の開始後に最初に答えるとき、Codex のサンドボックスが動くかを一度だけ確かめる（`codex sandbox -- true`）。
-  - 動けば、読み取り専用を基にし、資料フォルダだけ書き込める permission profile で動かす。
-  - 動かなければ（AppArmor が bwrap を止める Ubuntu 24.04 系など）、子の codex にだけガードの hook（`scripts/codex_guard.py`）を付ける。シェルは読み取りのコマンド（`cat` `head` `tail` `wc` `nl` `ls` `stat` `grep` `rg` `jq` `sed -n` `find`）を `|` でつないだものと検査のコマンドだけ、書き込み（`apply_patch`）は作業用コピー・回答ファイル・`images/` だけを許す。方針は `qa/guard-<番号>.json` に残る。
+  - 子の codex にだけ、すべてのツールに効くガードの hook（`scripts/codex_guard.py`）を付ける。許すのは、シェルでは読み取りのコマンド（`cat` `head` `tail` `wc` `nl` `ls` `stat` `grep` `rg` `jq` `find`、sed は `sed -n 1,80p ファイル` の形だけ）を `|` でつないだものと検査のコマンド、書き込み（`apply_patch`）では作業用コピー・回答ファイル・`images/` だけ、ほかに MCP のツールと、書き込み・実行をしない補助のツール。それ以外のツール（コードモード・サブエージェントなど）は拒む。方針は `qa/guard-<番号>.json` に残る。
+  - シェルは、引用符の外を安全な文字（英数字・`_./,:@%+=-*?~`・空白）に限り、bash でも zsh でも同じに読めるものだけを通す。
+  - 利用者の設定で hooks を切っていても効くよう、子では hooks を有効にし、ガードの外で動きうる機能（`multi_agent` `code_mode` `browser_use` `computer_use` など）は切る。
+  - 配信の開始後に最初に答えるとき、Codex のサンドボックスが動くかを一度だけ確かめる（`codex sandbox -- true`）。動けば、その上で読み取り専用＋資料フォルダだけ書ける設定にする。動かなければ（AppArmor が bwrap を止める Ubuntu 24.04 系など）、ガードだけで絞る。
   - ガードはシェルの文字列で判定するので、ツール単位の Claude Code より弱い。ガードの hook は信頼の確認を飛ばして付ける（`--dangerously-bypass-hook-trust`）ので、利用者が信頼していない自分の hook も、子の codex の中では動く。
-  - Web は `web_search`、MCP は `codex mcp list --json` で調べたサーバーを、承認なしで使えるようにする（`--local-only` では Web を止め、MCP のサーバーを無効にする）。
+  - Web は `web_search`、MCP は `codex mcp list --json` で調べたサーバーを、承認なしで使えるようにする（`--local-only` では Web を止め、MCP のサーバーを名前ごとに無効にし、ガードも MCP のツールを拒む）。
 - `qa/` の下（質問・回答・セッションの記録）と作業用コピーは静的配信で返さない。`qa/` はコミットしない（`tmp/` など無視される場所に置く）。
 
 ## うまく動かないとき

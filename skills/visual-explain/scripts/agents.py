@@ -14,6 +14,7 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass, field
 
@@ -28,8 +29,10 @@ HELPER_TOOLS = ["Task", "Agent", "Skill", "LSP"]
 EXTERNAL_TOOLS = ["WebSearch", "WebFetch", "ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool"]
 # claude mcp list の行（「名前: 接続先 - 状態」）。名前に「:」を含むもの（plugin:slack:slack）もある
 MCP_LINE_RE = re.compile(r"^(\S.*?): \S.* - \S")
-# サンドボックスが動かないときに codex exec を絞る hook
+# codex exec を絞る hook（すべてのツールに付ける）
 GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codex_guard.py")
+# 子の codex では切る機能（コードの実行やサブエージェントなど、ガードの外で動きうるもの）
+CODEX_DISABLED_FEATURES = ("multi_agent", "code_mode", "code_mode_only", "browser_use", "computer_use", "shell_zsh_fork")
 # codex の -c に dotted key のまま書ける名前（MCP サーバーの名前）
 SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -78,8 +81,8 @@ class Run:
     model: str = None
     local_only: bool = False
     mcp_names: list = field(default_factory=list)
-    sandbox: bool = True      # Codex: サンドボックスが動くか（False ならガードの hook で絞る）
-    guard_policy: str = None  # Codex: ガードの方針を書いた JSON のパス（sandbox が False のとき）
+    sandbox: bool = True      # Codex: サンドボックスが動くか（False なら danger-full-access で動かし、ガードだけで絞る）
+    guard_policy: str = None  # Codex: ガードの方針を書いた JSON のパス（Codex では必ず付ける）
 
 
 class Agent:
@@ -377,17 +380,21 @@ class CodexAgent(Agent):
             cmd += (["-c", "mcp_servers.%s.enabled=false" % name] if run.local_only else
                     ["-c", "mcp_servers.%s.default_tools_approval_mode=%s" % (name, toml_str("approve"))])
         if run.sandbox:
-            # 読み取り専用を基にし、資料フォルダ（作業用コピー・回答・images/）だけ書けるようにする
+            # 読み取り専用を基にし、資料フォルダだけ書けるようにする（その中で書いてよい所はガードが絞る）
             cmd += ["-c", "permissions.visual_explain.extends=%s" % toml_str(":read-only"),
                     "-c", "permissions.visual_explain.filesystem={%s = %s}" % (toml_str(run.material_dir), toml_str("write")),
                     "-c", "default_permissions=%s" % toml_str("visual_explain")]
         else:
-            # サンドボックスが動かない。子の codex だけに付けるガードの hook で、コマンドと書き込み先を絞る
-            # （-c で付けた hook は信頼されていないので、信頼の確認を飛ばす）
-            guard = "python3 -I %s --policy %s" % (shlex.quote(GUARD), shlex.quote(run.guard_policy))
-            cmd += ["-s", "danger-full-access", "--dangerously-bypass-hook-trust", "-c",
-                    'hooks.PreToolUse=[{matcher = "Bash|apply_patch", hooks = [{type = "command", command = %s, '
-                    'timeout = 30}]}]' % toml_str(guard)]
+            cmd += ["-s", "danger-full-access"]  # サンドボックスが動かない。ガードだけで絞る
+        # 子の codex だけに、すべてのツールを許可リストで絞るガードの hook を付ける。利用者の設定で hooks を
+        # 切っていても効くよう有効にし、ガードの外で動きうる機能は切る（-c で付けた hook は信頼されていないので、
+        # 信頼の確認を飛ばす）
+        guard = "%s -I %s --policy %s" % (shlex.quote(sys.executable), shlex.quote(GUARD), shlex.quote(run.guard_policy))
+        cmd += ["--enable", "hooks", "--dangerously-bypass-hook-trust", "-c",
+                'hooks.PreToolUse=[{matcher = "*", hooks = [{type = "command", command = %s, timeout = 30}]}]'
+                % toml_str(guard)]
+        for feature in CODEX_DISABLED_FEATURES:
+            cmd += ["--disable", feature]
         if run.mode in ("fork", "resume"):
             cmd += [run.mode, run.session_id]
         return cmd + ["-"]  # 指示文は標準入力から読ませる

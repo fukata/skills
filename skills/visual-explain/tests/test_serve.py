@@ -894,6 +894,25 @@ class CodexAnswerTest(ServeTestBase):
         self.assertIn("default_permissions", argv)
         self.assertNotIn("danger-full-access", argv)
 
+    def test_local_only_switches_codex_mcp_off(self):
+        self.codex_session("origin-x")
+        self.origin("origin-x")
+        self.start(local_only=True)
+        item = self.ask("外を見ないで")
+        self.assertEqual(item["status"], "answered", item)
+        argv = self.codex_calls()[-1]["argv"]
+        self.assertIn("mcp_servers.github.enabled=false", argv)
+        self.assertIn('web_search="disabled"', argv)
+        self.assertFalse([a for a in argv if "default_tools_approval_mode" in a])
+        self.assertFalse(json.loads(self.read("qa", "guard-q1.json"))["mcp"])
+
+    def test_guard_policy_allows_mcp_unless_local_only(self):
+        self.codex_session("origin-x")
+        self.origin("origin-x")
+        self.start()
+        self.ask("MCP")
+        self.assertTrue(json.loads(self.read("qa", "guard-q1.json"))["mcp"])
+
     def test_old_origin_without_agent_is_claude(self):
         self.origin("origin-y", agent=None)
         self.start()

@@ -59,7 +59,7 @@ npx skills remove -g visual-explain
 - 資料とリポジトリの外の情報は、Web とエージェントに設定された MCP のサーバーで調べます（`--local-only` で止めます）。
 - エージェントにできること:
   - Claude Code: 読み取り・Web・MCP・作業用コピーと回答と `images/` への書き込み・検査スクリプトだけをツール単位で許します。
-  - Codex: サンドボックスが動けば、読み取り専用＋資料フォルダだけ書き込める設定で動かします。動かなければ（AppArmor が bwrap を止める Ubuntu 24.04 系など）、子の codex にだけ付けるガードの hook（`scripts/codex_guard.py`）で、読み取りのコマンド・検査・資料フォルダへの書き込みだけを通します。ガードはシェルの文字列で判定するので、Claude Code より弱い仕組みです。
+  - Codex: 子の codex にだけ付けるガードの hook（`scripts/codex_guard.py`）で、すべてのツールを許可リストで絞ります（読み取りのコマンド・検査・作業用コピーと回答と `images/` への書き込み・MCP）。サンドボックスが動けば、その上で読み取り専用＋資料フォルダだけ書き込める設定で動かします（AppArmor が bwrap を止める Ubuntu 24.04 系などでは、ガードだけになります）。ガードはシェルの文字列で判定するので、Claude Code より弱い仕組みです。
 - 質問には、配信の出力に出る `?k=<合言葉>` 付きの URL で一度開く必要があります。配信者本人だけが使ってください。
 
 詳しくは [references/qa.md](references/qa.md)。

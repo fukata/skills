@@ -1637,10 +1637,11 @@ class App:
             return None
         return {"errors": errors[:5], "count": len(errors)} if errors else None
 
-    def mcp_servers(self, cwd, m=None):
-        """cwd で claude が読み込む MCP サーバーの名前。作業ディレクトリ（と、質問したセッションのアカウント）ごとに
-        1 回だけ調べ、同時に頼まれたら結果を待つ。調べられなかったときは覚えず、次の質問で調べ直す。"""
-        if self.cfg.local_only:
+    def mcp_servers(self, cwd, m=None, even_local=False):
+        """cwd でエージェントが読み込む MCP サーバーの名前。作業ディレクトリ（と、質問したセッションのアカウント）ごとに
+        1 回だけ調べ、同時に頼まれたら結果を待つ。調べられなかったときは覚えず、次の質問で調べ直す。
+        --local-only では調べない（even_local なら調べる。Codex は名前ごとに無効にするため）。"""
+        if self.cfg.local_only and not even_local:
             return []
         agent = self.agent_for(m)
         env = self.agent_env(m, agent)
@@ -1702,10 +1703,12 @@ class App:
         """エージェントに 1 件の質問を答えさせる（資料を作らせる）ための材料。書いてよいのは作業用コピー・回答・images/、
         動かしてよいのは検査だけ。"""
         checks = [a for a in (self.check_argv(m, m.draft), self.answer_check_argv(m, m.answer_path(item["id"]))) if a]
+        # Codex は --local-only でも MCP のサーバーの名前を調べる（名前ごとに無効にするため）
+        names = self.mcp_servers(plan.cwd, m, even_local=agent.key == "codex")
         return agents_mod.Run(mode=plan.mode, session_id=plan.session_id, cwd=plan.cwd, material_dir=m.dir,
                               write_files=[m.draft, m.answer_path(item["id"])], write_dirs=[m.images_dir],
                               check_argvs=checks, model=self.cfg.model, local_only=self.cfg.local_only,
-                              mcp_names=[] if self.cfg.local_only else self.mcp_servers(plan.cwd, m))
+                              mcp_names=names)
 
     def codex_sandbox(self, env):
         """Codex のサンドボックスが動くか。配信の間、最初の 1 回だけ確かめる。"""
@@ -1718,12 +1721,12 @@ class App:
         env = self.agent_env(m, agent)
         run = self.agent_run(m, item, plan, agent)
         if agent.key == "codex":
+            # 子の codex のツール・コマンド・書き込み先をガードの hook で絞る（方針は qa/ に残す）。サンドボックスが
+            # 動けば、その上で読み取り専用＋資料フォルダだけ書ける設定にする
             run.sandbox = self.codex_sandbox(env)
-            if not run.sandbox:
-                # サンドボックスが動かない。子の codex のコマンドと書き込み先をガードの hook で絞る（方針は qa/ に残す）
-                run.guard_policy = os.path.join(m.qa_dir, "guard-%s.json" % item["id"])
-                write_json(run.guard_policy, {"write_files": run.write_files, "write_dirs": run.write_dirs,
-                                              "commands": run.check_argvs})
+            run.guard_policy = os.path.join(m.qa_dir, "guard-%s.json" % item["id"])
+            write_json(run.guard_policy, {"write_files": run.write_files, "write_dirs": run.write_dirs,
+                                          "commands": run.check_argvs, "mcp": not run.local_only})
         cmd = agent.command(run)
         env[ASK_CHILD_ENV] = "1"
         job = self.job()

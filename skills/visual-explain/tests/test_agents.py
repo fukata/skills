@@ -122,43 +122,56 @@ class CodexAgentTest(unittest.TestCase):
         self.a = agents.CodexAgent(["codex"])
 
     def test_fork_resume_new_read_the_prompt_from_stdin(self):
-        fork = self.a.command(run(mode="fork", session_id="origin"))
+        fork = self.a.command(run(mode="fork", session_id="origin", guard_policy="/p.json"))
         self.assertEqual(fork[:4], ["codex", "exec", "--json", "--skip-git-repo-check"])
         self.assertEqual(fork[-3:], ["fork", "origin", "-"])
-        self.assertEqual(self.a.command(run(mode="resume", session_id="s2"))[-3:], ["resume", "s2", "-"])
-        new = self.a.command(run(mode="new", session_id=None))
+        self.assertEqual(self.a.command(run(mode="resume", session_id="s2", guard_policy="/p.json"))[-3:], ["resume", "s2", "-"])
+        new = self.a.command(run(mode="new", session_id=None, guard_policy="/p.json"))
         self.assertEqual(new[-1], "-")
         self.assertNotIn("fork", new)
         self.assertNotIn("resume", new)
-        model = self.a.command(run(model="gpt-x"))
+        model = self.a.command(run(model="gpt-x", guard_policy="/p.json"))
         self.assertEqual(model[model.index("-m") + 1], "gpt-x")
 
+    def guard_hook(self, cmd):
+        return next(c for c in cmd if c.startswith("hooks.PreToolUse="))
+
     def test_sandbox_profile_writes_only_the_material(self):
-        cmd = " ".join(self.a.command(run(sandbox=True)))
-        self.assertIn('permissions.visual_explain.extends=":read-only"', cmd)
-        self.assertIn('permissions.visual_explain.filesystem={"/out/topic" = "write"}', cmd)
-        self.assertIn('default_permissions="visual_explain"', cmd)
-        self.assertNotIn("danger-full-access", cmd)
-        self.assertNotIn("hooks.PreToolUse", cmd)
+        cmd = self.a.command(run(sandbox=True, guard_policy="/out/topic/qa/guard-q1.json"))
+        joined = " ".join(cmd)
+        self.assertIn('permissions.visual_explain.extends=":read-only"', joined)
+        self.assertIn('permissions.visual_explain.filesystem={"/out/topic" = "write"}', joined)
+        self.assertIn('default_permissions="visual_explain"', joined)
+        self.assertNotIn("danger-full-access", joined)
+        # サンドボックスが動いても、作業用コピー・回答・images/ 以外に書かせないようガードも付ける
+        self.assertIn("/out/topic/qa/guard-q1.json", self.guard_hook(cmd))
 
     def test_without_sandbox_uses_the_guard(self):
         cmd = self.a.command(run(sandbox=False, guard_policy="/out/topic/qa/guard-q1.json"))
         self.assertEqual(cmd[cmd.index("-s") + 1], "danger-full-access")
         self.assertIn("--dangerously-bypass-hook-trust", cmd)
-        hooks = next(c for c in cmd if c.startswith("hooks.PreToolUse="))
-        self.assertIn('matcher = "Bash|apply_patch"', hooks)
+        hooks = self.guard_hook(cmd)
+        self.assertIn('matcher = "*"', hooks)  # すべてのツール（ガードが許可リストで判定する）
         self.assertIn("codex_guard.py", hooks)
+        self.assertIn(sys.executable, hooks)
         self.assertIn("/out/topic/qa/guard-q1.json", hooks)
         self.assertNotIn("default_permissions", " ".join(cmd))
+
+    def test_guard_cannot_be_switched_off_by_the_users_config(self):
+        cmd = self.a.command(run(sandbox=False, guard_policy="/p.json"))
+        self.assertEqual(cmd[cmd.index("--enable") + 1], "hooks")
+        disabled = [cmd[i + 1] for i, c in enumerate(cmd) if c == "--disable"]
+        for feature in ("multi_agent", "code_mode", "code_mode_only", "browser_use", "computer_use", "shell_zsh_fork"):
+            self.assertIn(feature, disabled)
         # -s はサブコマンド（fork/resume）より前に置く
         fork = self.a.command(run(mode="fork", session_id="o", sandbox=False, guard_policy="/p.json"))
         self.assertLess(fork.index("-s"), fork.index("fork"))
 
     def test_web_and_mcp(self):
-        cmd = self.a.command(run(mcp_names=["github"]))
+        cmd = self.a.command(run(mcp_names=["github"], guard_policy="/p.json"))
         self.assertIn('web_search="live"', cmd)
         self.assertIn('mcp_servers.github.default_tools_approval_mode="approve"', cmd)
-        local = self.a.command(run(mcp_names=["github"], local_only=True))
+        local = self.a.command(run(mcp_names=["github"], local_only=True, guard_policy="/p.json"))
         self.assertIn('web_search="disabled"', local)
         self.assertIn("mcp_servers.github.enabled=false", local)
 
