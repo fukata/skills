@@ -51,8 +51,9 @@ serve.py export が書き出した「読者からの質問と回答」の節（<
 出てくれば載っているとみなす（テーブル名とモデル名など）。# で始まる行と空行は読み飛ばす。
 
 検査しないもの: 説明の正しさ、図が仕組みを表しているか、文章の読みやすさ。
-ブラウザの検査はヘッドレス Chrome（--chrome、環境変数 VISUAL_EXPLAIN_CHROME、PATH、
-Playwright のキャッシュの順に探す）で行い、見つからなければ飛ばして警告を出す。
+ブラウザの検査はヘッドレス Chrome（--chrome、環境変数 VISUAL_EXPLAIN_CHROME、chrome-headless-shell、
+PATH の Chrome・Chromium、Playwright のキャッシュの順に探し、起動してページを取り出せた最初のものを使う）で行い、
+見つからなければ飛ばして警告を出す。
 文字幅はこのマシンのフォントで測るため、閲覧側のフォントでの見え方とは一致しない。
 """
 import argparse
@@ -783,21 +784,59 @@ MEASURE_JS = r"""
 """
 
 
+def headless_flag(chrome):
+    """通常の Chrome・Chromium に付ける引数（chrome-headless-shell には要らない）。"""
+    return [] if "headless" in os.path.basename(chrome).lower() else ["--headless=new"]
+
+
+CHROME_WORKS = {}
+
+
+def chrome_works(chrome):
+    """起動して、ページを取り出せるかを確かめる（同じプロセスでは 1 回だけ）。
+
+    実行ファイルがあっても動くとは限らない（snap の案内だけのスクリプト、ページを取り出さずに止まる Chromium）。
+    動かないものを選ぶと、検査のたびに時間切れまで待つことになる。
+    """
+    if chrome not in CHROME_WORKS:
+        work = tempfile.mkdtemp(prefix="ve-probe-")
+        try:
+            out = subprocess.run([chrome] + headless_flag(chrome) + [
+                "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                "--user-data-dir=" + os.path.join(work, "profile"), "--virtual-time-budget=1000",
+                "--dump-dom", "data:text/html,<p id=ve-probe>ok</p>"], capture_output=True, timeout=20).stdout
+            CHROME_WORKS[chrome] = b"ve-probe" in out
+        except (OSError, subprocess.SubprocessError):
+            CHROME_WORKS[chrome] = False
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    return CHROME_WORKS[chrome]
+
+
 def find_chrome(explicit):
-    candidates = [explicit, os.environ.get("VISUAL_EXPLAIN_CHROME")]
-    for name in ("chrome-headless-shell", "chromium", "chromium-browser", "google-chrome",
-                 "google-chrome-stable", "chrome"):
+    """ページを取り出せる最初の Chrome を返す。無ければ None。
+
+    順番: --chrome、環境変数、chrome-headless-shell（PATH・Playwright のキャッシュ）、PATH の Chrome・Chromium、
+    macOS のアプリ、Playwright のキャッシュの Chromium。
+    """
+    def cached(*patterns):
+        found = []
+        for cache in (os.path.expanduser("~/.cache/ms-playwright"), os.path.expanduser("~/Library/Caches/ms-playwright")):
+            for pattern in patterns:
+                hits = glob.glob(os.path.join(cache, pattern))
+                hits.sort(key=lambda p: [int(n) for n in re.findall(r"-(\d+)/", p)] or [0], reverse=True)
+                found += hits
+        return found
+
+    candidates = [explicit, os.environ.get("VISUAL_EXPLAIN_CHROME"), shutil.which("chrome-headless-shell")]
+    candidates += cached("chromium_headless_shell-*/*/chrome-headless-shell", "chromium_headless_shell-*/*/headless_shell")
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
         candidates.append(shutil.which(name))
     candidates += ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                    "/Applications/Chromium.app/Contents/MacOS/Chromium"]
-    for cache in (os.path.expanduser("~/.cache/ms-playwright"), os.path.expanduser("~/Library/Caches/ms-playwright")):
-        for pattern in ("chromium_headless_shell-*/*/chrome-headless-shell", "chromium_headless_shell-*/*/headless_shell",
-                        "chromium-*/chrome-linux*/chrome", "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium"):
-            found = glob.glob(os.path.join(cache, pattern))
-            found.sort(key=lambda p: [int(n) for n in re.findall(r"-(\d+)/", p)] or [0], reverse=True)
-            candidates += found
+    candidates += cached("chromium-*/chrome-linux*/chrome", "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium")
     for c in candidates:
-        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+        if c and os.path.isfile(c) and os.access(c, os.X_OK) and chrome_works(c):
             return c
     return None
 
@@ -831,9 +870,7 @@ def measure(chrome, html_path, width, height, print_media=False, base_dir=None, 
         page = os.path.join(work, "page.html")
         with open(page, "w", encoding="utf-8") as fh:
             fh.write(src)
-        args = [chrome]
-        if "headless" not in os.path.basename(chrome).lower():
-            args.append("--headless=new")
+        args = [chrome] + headless_flag(chrome)
         args += ["--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
                  "--no-default-browser-check", "--allow-file-access-from-files",
                  "--user-data-dir=" + os.path.join(work, "profile"),
