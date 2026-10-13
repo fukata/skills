@@ -39,6 +39,21 @@ class SkillMdTest(unittest.TestCase):
         for ref in re.findall(r"手順(\d+)", TEXT):
             self.assertLessEqual(int(ref), last, f"手順{ref} は無い")
 
+    def test_person_steps_are_numbered_in_order(self):
+        numbers = [int(n) for n in re.findall(r"^### P(\d+)\. ", TEXT, re.M)]
+        self.assertTrue(numbers, "個人向けの手順が無い")
+        self.assertEqual(numbers, list(range(1, len(numbers) + 1)))
+
+    def test_referenced_person_steps_exist(self):
+        last = max(int(n) for n in re.findall(r"^### P(\d+)\. ", TEXT, re.M))
+        for ref in re.findall(r"手順P(\d+)", TEXT):
+            self.assertLessEqual(int(ref), last, f"手順P{ref} は無い")
+
+    def test_person_scope_sections_exist(self):
+        # 個人を調べる範囲の歯止めが消えていないこと
+        for heading in ("## 対象にする個人", "### 個人について調べないこと"):
+            self.assertIn(heading + "\n", TEXT)
+
     def test_verdicts_are_defined(self):
         for verdict in ("懸念なし", "要確認", "避けるのが無難", "情報不足"):
             self.assertIn(f"- **{verdict}**:", TEXT)
