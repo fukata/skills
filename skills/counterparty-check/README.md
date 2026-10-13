@@ -1,4 +1,4 @@
-# company-check
+# counterparty-check
 
 業務委託案件の発注元や取引候補の会社について、関わる前に知っておくべき懸念がないかを公開情報から調べるスキルです。
 
@@ -10,13 +10,13 @@
 ## 導入
 
 ```bash
-npx skills add fukata/skills -g -a claude-code -s company-check
+npx skills add fukata/skills -g -a claude-code -s counterparty-check
 ```
 
 hook は使いません。外すとき:
 
 ```bash
-npx skills remove -g company-check
+npx skills remove -g counterparty-check
 ```
 
 ## 依存
@@ -29,9 +29,9 @@ npx skills remove -g company-check
 会社名を渡して呼び出します。所在地や事業内容を添えると、似た名前の別会社と取り違えにくくなります。
 
 ```text
-/company-check 株式会社A
-/company-check 株式会社A 株式会社B 株式会社C
-/company-check 株式会社A（恵比寿、チケット販売）
+/counterparty-check 株式会社A
+/counterparty-check 株式会社A 株式会社B 株式会社C
+/counterparty-check 株式会社A（恵比寿、チケット販売）
 ```
 
 - 結果は会話に報告します。ファイルには保存しません。
@@ -43,7 +43,7 @@ npx skills remove -g company-check
 ## テスト
 
 ```bash
-bash skills/company-check/tests/run.sh
+bash skills/counterparty-check/tests/run.sh
 ```
 
 python3 が必須です。`SKILL.md` の形式だけを確かめ、Web には接続しません。
