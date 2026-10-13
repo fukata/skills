@@ -8,7 +8,7 @@
 - 回答の書き出し先: {{answer_path}}
 - 回答の番号: {{qa_id}}
 - 読んでいた節: {{section}}
-- 質問者が本文で選んだ部分: {{quote}}
+- 質問者が選んだ部分: {{quote}}
 - 資料とリポジトリの外の情報源: {{external_sources}}
 
 ## 質問
@@ -16,6 +16,10 @@
 <question>
 {{question}}
 </question>
+
+## 続きの質問の元
+
+{{reply_to}}
 
 ## 手順
 

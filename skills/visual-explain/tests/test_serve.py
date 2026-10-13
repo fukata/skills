@@ -405,6 +405,44 @@ class AnswerTest(ServeTestBase):
         self.assertIn("--fragment", prompt)
         self.assertNotIn("{{", prompt)
 
+    def test_reply_to_an_answer(self):
+        self.start()
+        self.ask("最初の質問")
+        self.ask("別の質問")
+        item = self.ask("もう少し詳しく", reply_to="q1", quote="回答: 最初", quote_from="answer")
+        self.assertEqual((item["id"], item["status"], item["reply_to"], item["quote_from"]), ("q3", "answered", "q1", "answer"))
+        # 続きの質問も、前の質問のセッションの続きで答える
+        self.assertIn("--resume", self.calls()[2]["argv"])
+        prompt = self.app.build_prompt(serve.Material(self.app.cfg, DOC), item)
+        self.assertIn("<question>\nもう少し詳しく\n</question>", prompt)
+        self.assertIn("質問者は Q1 の回答を読み", prompt)
+        self.assertIn("<previous_question>\n最初の質問\n</previous_question>", prompt)
+        self.assertIn("<previous_answer>\n<p>回答: 最初の質問</p>\n</previous_answer>", prompt)
+        self.assertIn("「回答: 最初」（Q1 の回答から）", prompt)
+        self.assertNotIn("{{", prompt)
+        # 続きの質問でなければ、元は無い。選んだ部分は資料の本文
+        plain = self.app.build_prompt(serve.Material(self.app.cfg, DOC), {"id": "q9", "question": "なぜ？", "quote": "毎月1日"})
+        self.assertIn("（なし。前の回答への続きの質問ではない）", plain)
+        self.assertIn("「毎月1日」（資料の本文から）", plain)
+        self.assertNotIn("previous_answer", plain)
+        # 元の回答の中の {{...}} は置き換えない
+        self.write_items([{"id": "q1", "question": "{{question}} とは", "status": "answered", "answer_html": "<p>{{doc_path}}</p>"}])
+        odd = self.app.build_prompt(serve.Material(self.app.cfg, DOC), {"id": "q2", "question": "続き", "reply_to": "q1"})
+        self.assertIn("<previous_question>\n{{question}} とは\n</previous_question>", odd)
+        self.assertIn("<p>{{doc_path}}</p>", odd)
+
+    def test_reply_needs_an_answered_question(self):
+        self.start()
+        self.ask("FAIL")
+        for reply_to in ("q1", "q9", "x", "", 1):
+            status, _, data = self.req("POST", "/__qa/questions", {"doc": DOC, "question": "続き", "reply_to": reply_to})
+            self.assertEqual(status, 400, (reply_to, data))
+            self.assertIn("回答した質問にだけ", json.loads(data)["error"])
+        self.assertEqual(len(self.state()["items"]), 1)
+        # 続きの質問でなければ、回答から選んだ印は付けない
+        self.assertNotIn("quote_from", self.send("ふつうの質問", quote="本文", quote_from="answer"))
+        self.assertTrue(self.app.wait_idle(30))
+
     def test_allows_both_checks(self):
         self.start()
         self.ask("検査")
@@ -606,6 +644,22 @@ class ExportTest(ServeTestBase):
         self.assertIn("Q3. 集計は？", self.exported())
         status, _, data = self.req("POST", "/__qa/export", {"doc": DOC})
         self.assertEqual((status, json.loads(data)["updated"]), (200, False))
+
+    def test_keeps_follow_up_questions_under_their_answer(self):
+        self.write_items([
+            {"id": "q1", "question": "最初の質問", "status": "answered", "answer_html": "<p>一</p>"},
+            {"id": "q2", "question": "別の質問", "status": "answered", "answer_html": "<p>二</p>"},
+            {"id": "q3", "question": "最初の続き", "status": "answered", "answer_html": "<p>三</p>", "reply_to": "q1"},
+            {"id": "q4", "question": "続きの続き", "status": "answered", "answer_html": "<p>四</p>", "reply_to": "q3"},
+            {"id": "q5", "question": "失敗した質問の続き", "status": "answered", "answer_html": "<p>五</p>", "reply_to": "q0"}])
+        self.start()
+        self.assertEqual(json.loads(self.req("POST", "/__qa/export", {"doc": DOC})[2])["count"], 5)
+        section = self.exported()
+        order = [section.index("<h3>Q%d." % n) for n in (1, 3, 4, 2, 5)]
+        self.assertEqual(order, sorted(order))
+        self.assertIn('<a href="#reader-qa-q1">Q1</a> の回答への質問', section)
+        self.assertIn('<a href="#reader-qa-q3">Q3</a> の回答への質問', section)
+        self.assertIn('<p class="note">Q0 の回答への質問</p>', section)
 
     def test_sanitizes_answers(self):
         danger = ('<p onclick="x()">安全</p><script>alert(1)</script><style>p{}</style>'
@@ -1031,7 +1085,9 @@ class WidgetTest(ServeTestBase):
                                   "doc": {"updated": True, "sections": [{"id": "flow", "title": "流れ"}]},
                                   "progress": [{"text": "資料を読んでいます"}, {"text": "回答を書いています"}],
                                   "answer_check": {"errors": ["Markdown の記法"], "count": 1}},
-                                 {"id": "q2", "question": "取り消した質問", "status": "canceled"}]}, f)
+                                 {"id": "q2", "question": "取り消した質問", "status": "canceled"},
+                                 {"id": "q3", "question": "続きの質問", "status": "answered", "answer_html": "<p>続きの回答</p>",
+                                  "reply_to": "q1", "quote": "安全な", "quote_from": "answer"}]}, f)
         doc = self.read("explanation.html").replace('<nav><a href="#flow">', '<nav><a href="#context">前提</a><a href="#flow">', 1)
         # 古い雛形の図（width が無く、幅いっぱいに広げる CSS）
         doc = doc.replace("</main>", '<div class="diagram"><svg viewBox="0 0 640 90"><title>古い図</title></svg></div></main>')
@@ -1059,6 +1115,11 @@ class WidgetTest(ServeTestBase):
         self.assertIn("取り消し済み", root)
         self.assertIn("回答を資料に書き出す", root)
         self.assertNotIn("ve-qa-cancel", root)
+        # 続きの質問は元の質問のすぐ下に並び、回答した質問には続けて質問できる
+        self.assertLess(root.index("続きの質問"), root.index("取り消した質問"))
+        self.assertIn("Q1 の回答への質問 · 「安全な」", root)
+        self.assertRegex(root, r'class="ve-qa-item ve-qa-reply" id="ve-qa-q3"')
+        self.assertEqual(root.count("この回答に質問する"), 2)
         self.assertIn('<svg viewBox="0 0 640 90" width="640" height="90">', out)
         # 読んでいる節（先頭の「前提」）の目次の項目が強調される
         self.assertRegex(out, r'<a href="#context"[^>]*aria-current="true"')

@@ -5,6 +5,7 @@
  * BroadcastChannel でやり取りし、読んでいる節・選んだ文字を受け取り、節へのリンクで資料のウィンドウを動かす。
  * 回答を待つ間は claude の途中経過を出し、待機中・作成中の質問は取り消せる。回答が届いたとき、
  * このタブを見ていなければタイトルの先頭に件数を付ける。回答した質問は、資料の末尾の節に書き出せる。
+ * 回答には続けて質問できる（「この回答に質問する」か、回答の中の文字を選ぶ）。続きの質問は、元の質問のすぐ下に並べる。
  * エージェント（Claude Code の AskUserQuestion・Codex の request_user_input）が質問した資料（ask_hook.py が
  * 登録したもの）では、質問欄の上に選択肢を出し、選んだ答えを配信サーバーに送る（フックが受け取り、元のセッションに返す）。 */
 (function () {
@@ -30,6 +31,8 @@
   var clockSkew = 0, finished = {}, rendered = {};
   var baseTitle = document.title, titleUnseen = 0, exported = null;
   var ask = null, askSig = '', askSeen = {}, askSending = false, askEvents = null;
+  // 続きの質問の元（質問の id）と、選んだ文字の出どころ（'doc' は資料の本文、'answer' は元の回答）
+  var replyTo = null, quoteFrom = '';
 
   // 合言葉（?k=）は Cookie に移ったので、アドレス欄から消す（URL をそのまま人に渡しても質問の権限が渡らないように）
   if (/[?&]k=/.test(location.search)) {
@@ -65,7 +68,13 @@
   var quoteBox = el('div', { class: 've-qa-quote', hidden: true });
   var quoteText = el('q');
   var quoteClear = el('button', { type: 'button', text: '外す' });
-  quoteBox.append(el('span', { text: '選んだ部分: ' }), quoteText, quoteClear);
+  var quoteLabel = el('span', { text: '選んだ部分: ' });
+  quoteBox.append(quoteLabel, quoteText, quoteClear);
+  var replyBox = el('div', { class: 've-qa-quote ve-qa-replyto', hidden: true });
+  var replyLabel = el('span');
+  var replyText = el('q');
+  var replyClear = el('button', { type: 'button', text: '外す' });
+  replyBox.append(replyLabel, replyText, replyClear);
   var where = el('span', { class: 've-qa-where' });
   var input = el('textarea', { id: 've-qa-input', rows: '3', maxlength: '4000',
     placeholder: '分からない所を書いてください（Ctrl+Enter で送る）' });
@@ -77,6 +86,7 @@
   var askBox = el('section', { class: 've-qa-ask', hidden: true, 'aria-label': 'エージェントからの質問' });
   var askOthers = el('section', { class: 've-qa-ask-others', hidden: true, 'aria-label': 'ほかに答えを待っている質問' });
   var form = el('form', { class: 've-qa-form' }, [
+    replyBox,
     quoteBox,
     el('label', { for: 've-qa-input', class: 've-qa-label' }, ['質問 ', where]),
     input,
@@ -204,32 +214,69 @@
     where.textContent = s ? '（読んでいる節: ' + s.title + '）' : '';
   }
 
-  if (!WIN) document.addEventListener('selectionchange', function () {
+  document.addEventListener('selectionchange', function () {
     var sel = document.getSelection();
-    if (!sel || sel.isCollapsed || ownNode(sel.anchorNode)) return;
+    if (!sel || sel.isCollapsed || !sel.anchorNode) return;
     var text = sel.toString().replace(/\s+/g, ' ').trim();
     if (!text) return;
-    quote = text.slice(0, 2000);
     var node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
-    quoteSection = node && node.closest('section[id]');
+    if (ownNode(node)) {
+      // 回答の中の文字を選んだら、その回答への続きの質問にする
+      var a = node.closest('.ve-qa-a'), li = a && a.closest('.ve-qa-item');
+      var item = li && findItem(li.getAttribute('data-id'));
+      if (!canReply(item)) return;
+      quote = text.slice(0, 2000);
+      quoteFrom = 'answer';
+      quoteSection = null;
+      replyTo = item.id;
+      if (WIN) post({ type: 'clear-quote' });  // 資料のウィンドウで選んでいた文字は外す
+    } else if (WIN) {
+      return;
+    } else {
+      quote = text.slice(0, 2000);
+      quoteFrom = 'doc';
+      quoteSection = node && node.closest('section[id]');
+    }
     updateWhere();
     renderQuote();
+    renderReply();
     sendContext();
   });
 
+  function label(id) { return String(id).toUpperCase(); }
+
+  function findItem(id) { return items.filter(function (i) { return i.id === id; })[0]; }
+
+  function canReply(item) { return !!item && item.status === 'answered' && item.kind !== 'build'; }
+
+  function renderReply() {
+    var item = replyTo && findItem(replyTo);
+    replyBox.hidden = !replyTo;
+    replyLabel.textContent = replyTo ? label(replyTo) + ' の回答への質問: ' : '';
+    replyText.textContent = item ? item.question : '';
+  }
+
   function renderQuote() {
     quoteBox.hidden = !quote;
+    quoteLabel.textContent = quoteFrom === 'answer' && replyTo ? label(replyTo) + ' の回答で選んだ部分: ' : '選んだ部分: ';
     quoteText.textContent = quote.length > 140 ? quote.slice(0, 140) + '…' : quote;
     toggleLabel.textContent = detached ? '質問欄（別ウィンドウ）' : quote && !open ? '選んだ所を質問する' : '質問する';
   }
 
   function clearQuote() {
     quote = '';
+    quoteFrom = '';
     renderQuote();
     if (WIN) post({ type: 'clear-quote' }); else sendContext();
   }
 
   quoteClear.addEventListener('click', function () { clearQuote(); input.focus(); });
+  replyClear.addEventListener('click', function () {
+    replyTo = null;
+    if (quoteFrom === 'answer') clearQuote();
+    renderReply();
+    input.focus();
+  });
 
   // ---- 開閉
 
@@ -376,7 +423,8 @@
     if (WIN) {
       if (m.type === 'context') {
         peerSection = m.section || null;
-        quote = m.quote || '';
+        // 回答で選んだ文字は、資料のウィンドウで新しく選ぶまで残す
+        if (m.quote || quoteFrom !== 'answer') { quote = m.quote || ''; quoteFrom = quote ? 'doc' : ''; }
         updateWhere();
         renderQuote();
       } else if (m.type === 'went') {
@@ -389,8 +437,8 @@
     if (m.type === 'hello') setDetached(true);
     else if (m.type === 'bye') setDetached(false);
     else if (m.type === 'attach') { setDetached(false); setOpen(true); }
-    else if (m.type === 'clear-quote') { quote = ''; renderQuote(); sendContext(); }
-    else if (m.type === 'sent') { quote = ''; renderQuote(); sendContext(); schedule(0); }
+    else if (m.type === 'clear-quote') { quote = ''; quoteFrom = ''; renderQuote(); sendContext(); }
+    else if (m.type === 'sent') { quote = ''; quoteFrom = ''; renderQuote(); sendContext(); schedule(0); }
     else if (m.type === 'goto' && m.id) { goTo(m.id); post({ type: 'went' }); }
     else if (m.type === 'exported') { exported = { rev: m.rev, sections: m.sections || [] }; schedule(0); }
   };
@@ -531,10 +579,12 @@
   }
 
   function renderItem(item) {
-    var li = el('li', { class: 've-qa-item', id: 've-qa-' + item.id, 'data-status': item.status });
-    var q = el('div', { class: 've-qa-q' }, [el('span', { class: 've-qa-tag', text: item.kind === 'build' ? '資料' : '質問' }),
+    var li = el('li', { class: item.reply_to ? 've-qa-item ve-qa-reply' : 've-qa-item', id: 've-qa-' + item.id,
+      'data-id': item.id, 'data-status': item.status });
+    var q = el('div', { class: 've-qa-q' }, [el('span', { class: 've-qa-tag', text: item.kind === 'build' ? '資料' : label(item.id) }),
       el('p', { text: item.question })]);
     var meta = [];
+    if (item.reply_to) meta.push(label(item.reply_to) + ' の回答への質問');
     if (item.section && item.section.title) meta.push('節: ' + item.section.title);
     if (item.quote) meta.push('「' + (item.quote.length > 80 ? item.quote.slice(0, 80) + '…' : item.quote) + '」');
     if (meta.length) q.appendChild(el('p', { class: 've-qa-meta', text: meta.join(' · ') }));
@@ -550,6 +600,10 @@
       var a = el('div', { class: 've-qa-a' }, [el('span', { class: 've-qa-tag', text: '回答' })]);
       a.appendChild(sanitize(item.answer_html));
       li.appendChild(a);
+      if (canReply(item)) {
+        li.appendChild(el('div', { class: 've-qa-itemtools' }, [el('button', { type: 'button', class: 've-qa-link ve-qa-reply-btn',
+          'data-id': item.id, text: 'この回答に質問する', title: 'この回答について続けて質問します（回答の中の文字を選んでも同じです）' })]));
+      }
     }
     if (item.status === 'failed' && item.error) li.appendChild(el('p', { class: 've-qa-fail', text: item.error }));
     var note = docNote(item.doc);
@@ -560,19 +614,34 @@
     return li;
   }
 
+  // 続きの質問（reply_to）を、元の質問のすぐ後ろに並べる。同じ元の中では聞いた順（serve.py の thread_order と同じ）
+  function threaded(all) {
+    var pos = {};
+    all.forEach(function (i, n) { pos[i.id] = n; });
+    function root(n) {
+      var seen = {};
+      while (!seen[n] && pos[all[n].reply_to] != null) { seen[n] = true; n = pos[all[n].reply_to]; }
+      return n;
+    }
+    return all.map(function (i, n) { return { item: i, root: root(n), n: n }; })
+      .sort(function (a, b) { return a.root - b.root || a.n - b.n; })
+      .map(function (x) { return x.item; });
+  }
+
   function render() {
     empty.hidden = items.length > 0;
     var ids = {};
-    items.forEach(function (item) {
+    threaded(items).forEach(function (item, n) {
       ids[item.id] = true;
-      var sig = signature(item), prev = rendered[item.id];
+      var sig = signature(item), prev = rendered[item.id], li = prev && prev.li;
       if (prev && prev.sig === sig) {
-        if (item.status === 'answering') prev.li.querySelector('.ve-qa-status').textContent = statusText(item);
-        return;
+        if (item.status === 'answering') li.querySelector('.ve-qa-status').textContent = statusText(item);
+      } else {
+        li = renderItem(item);
+        if (prev) list.replaceChild(li, prev.li);
+        rendered[item.id] = { sig: sig, li: li };
       }
-      var li = renderItem(item);
-      if (prev) list.replaceChild(li, prev.li); else list.appendChild(li);
-      rendered[item.id] = { sig: sig, li: li };
+      if (list.children[n] !== li) list.insertBefore(li, list.children[n] || null);
     });
     Object.keys(rendered).forEach(function (id) { if (!ids[id]) { rendered[id].li.remove(); delete rendered[id]; } });
     var disabled = !auth || !qa.enabled;
@@ -1002,16 +1071,21 @@
     error.textContent = '';
     sending = true;
     send.disabled = true;
-    postJson('questions', { doc: DOC, question: question, section: currentSection(), quote: quote || null })
+    postJson('questions', { doc: DOC, question: question, section: currentSection(), quote: quote || null,
+      reply_to: replyTo, quote_from: quote && replyTo && quoteFrom === 'answer' ? 'answer' : null })
       .then(function (x) {
         if (x.r.status === 202) {
           input.value = '';
           quote = '';
+          quoteFrom = '';
+          replyTo = null;
           renderQuote();
+          renderReply();
           if (WIN) post({ type: 'sent' }); else sendContext();
           items.push(x.b);
           render();
-          list.lastElementChild && list.lastElementChild.scrollIntoView({ block: 'nearest' });
+          var sent = document.getElementById('ve-qa-' + x.b.id);
+          sent && sent.scrollIntoView({ block: 'nearest' });
           return;
         }
         if (x.r.status === 401) auth = false;
@@ -1043,6 +1117,18 @@
       })
       .catch(function () { showToast(['配信サーバーに接続できません。']); b.disabled = false; })
       .then(function () { schedule(0); });
+  });
+
+  // 回答に続けて質問する。送ると、元の質問と回答がエージェントに渡り、質問は元の質問のすぐ下に並ぶ
+  list.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('.ve-qa-reply-btn');
+    if (!b || input.disabled) return;
+    var id = b.getAttribute('data-id');
+    if (quoteFrom === 'answer' && replyTo !== id) clearQuote();
+    replyTo = id;
+    renderQuote();
+    renderReply();
+    input.focus();
   });
 
   // 回答した質問を、資料の末尾の節に書き出す（資料のファイルだけを渡しても読めるように）

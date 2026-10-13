@@ -55,7 +55,7 @@ SKILL_MD = os.path.join(SKILL_DIR, "SKILL.md")
 TEMPLATE = os.path.join(SKILL_DIR, "assets", "explanation.html")
 BUILD_PROMPT = os.path.join(SKILL_DIR, "assets", "ask", "build-prompt.md")
 SERVE_PY = os.path.abspath(__file__)
-VERSION = "1.0.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
+VERSION = "1.1.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
 ASK_CHILD_ENV = "VISUAL_EXPLAIN_ASK_CHILD"  # 配信サーバーが動かす claude -p の印。フックはこの中の質問を扱わない
 
 QA_DIR = "qa"                 # 資料フォルダの中で質問と回答を置くフォルダ。静的配信では返さない
@@ -64,6 +64,7 @@ MAX_QUESTION = 4000
 MAX_QUOTE = 2000
 MAX_BODY = 64 * 1024
 MAX_ANSWER = 512 * 1024
+MAX_REPLY_CONTEXT = 20000     # 続きの質問の指示文に入れる、元の回答の長さ（文字）
 CHECK_TIMEOUT = 600
 KILL_GRACE = 10               # 時間切れで SIGTERM を送ってから SIGKILL までの猶予（秒）
 ALL_INTERFACES = {"", "0.0.0.0", "::", "[::]"}
@@ -437,15 +438,35 @@ def short_time(iso):
         return ""
 
 
+def thread_order(items):
+    """続きの質問（reply_to）を、元の質問のすぐ後ろに並べる。同じ元の中では聞いた順（質問欄の並びと同じ）。"""
+    pos = {i.get("id"): n for n, i in enumerate(items)}
+
+    def root(n):
+        seen = set()
+        while n not in seen and items[n].get("reply_to") in pos:
+            seen.add(n)
+            n = pos[items[n]["reply_to"]]
+        return n
+
+    return [items[n] for n in sorted(range(len(items)), key=lambda n: (root(n), n))]
+
+
 def export_section(items, ids, stamp):
     """回答した質問を、資料の末尾に置く節（印で囲む）にする。ids は資料の id（節へのリンクを残すか決める）。
     stamp は書き出した時刻の文字（YYYY-MM-DD HH:MM）。"""
     out = [EXPORT_BEGIN, '<section id="%s" class="reader-qa">' % EXPORT_ID, "  <h2>%s</h2>" % EXPORT_TITLE,
            '  <p class="note">資料を配信したページで読み手が質問し、資料を配信したマシンのエージェント（Claude Code・Codex）が答えた記録'
            "（%d 件。%s に書き出し）。</p>" % (len(items), stamp)]
-    for item in items:
+    exported = {str(i.get("id")) for i in items}
+    for item in thread_order(items):
         qid = str(item.get("id"))
         meta = []
+        parent = item.get("reply_to")
+        if parent:
+            label = html.escape(str(parent).upper())
+            meta.append(('<a href="#%s-%s">%s</a>' % (EXPORT_ID, html.escape(str(parent), quote=True), label)
+                         if parent in exported else label) + " の回答への質問")
         sec = item.get("section") or {}
         if sec.get("id"):
             title = html.escape(sec.get("title") or sec["id"])
@@ -1134,7 +1155,12 @@ class App:
         with self.lock:
             return self.load(m)["items"]
 
-    def enqueue(self, m, question, section=None, quote=None, kind=None):
+    def reply_target(self, m, qid):
+        """続きの質問を受けられる項目（回答した質問）。無ければ None。"""
+        item = next((i for i in self.items(m) if i.get("id") == qid), None)
+        return item if item and item.get("status") == "answered" and item.get("kind") != "build" else None
+
+    def enqueue(self, m, question, section=None, quote=None, kind=None, reply_to=None, quote_from=None):
         with self.lock:
             data = self.load(m)
             numbers = [int(i["id"][1:]) for i in data["items"] if re.fullmatch(r"q\d+", str(i.get("id", "")))]
@@ -1143,6 +1169,10 @@ class App:
                     "answer_html": None, "doc": None, "error": None, "session": None}
             if kind:
                 item["kind"] = kind  # "build": AskUserQuestion の質問のために資料を作る
+            if reply_to:
+                item["reply_to"] = reply_to  # 続きの質問: 元の質問の id
+            if quote_from:
+                item["quote_from"] = quote_from  # "answer": 選んだ部分は、元の回答の中の文字
             data["items"].append(item)
             write_json(m.state_path, data)
         self.queue.put((m.rel, item["id"]))
@@ -1670,6 +1700,20 @@ class App:
             return "使えない（配信の設定で止めてある）。資料とリポジトリだけで答える"
         return self.agent_for(m).external_label(self.mcp_servers(cwd, m))
 
+    def reply_context(self, m, item):
+        """続きの質問のとき、元の質問と回答を指示文に入れる（新しいセッションで答えるときも、何の続きかが分かるように）。"""
+        parent = self.reply_target(m, item.get("reply_to")) if item.get("reply_to") else None
+        if not parent:
+            return "（なし。前の回答への続きの質問ではない）"
+        answer = parent.get("answer_html") or ""
+        if len(answer) > MAX_REPLY_CONTEXT:
+            answer = answer[:MAX_REPLY_CONTEXT] + "\n（長いので、ここまで）"
+        return ("質問者は %s の回答を読み、その回答について続けて質問している。質問の中の「これ」「その」などは、下の質問と回答を指す。"
+                "下の回答で足りなかった所・分かりにくかった所に答え、同じ説明を繰り返さない。\n\n"
+                "<previous_question>\n%s\n</previous_question>\n\n<previous_answer>\n%s\n</previous_answer>"
+                % (parent["id"].upper(), (parent.get("question") or "").replace("</previous_question>", "&lt;/previous_question>"),
+                   answer.replace("</previous_answer>", "&lt;/previous_answer>")))
+
     def build_prompt(self, m, item, cwd=None):
         build = item.get("kind") == "build"
         agent = self.agent_for(m)
@@ -1682,7 +1726,10 @@ class App:
         values = {
             "doc_path": m.path, "draft_path": m.draft, "answer_path": m.answer_path(item["id"]), "qa_id": item["id"],
             "section": "%s（#%s）" % (section.get("title") or section["id"], section["id"]) if section.get("id") else "（不明）",
-            "quote": "「%s」" % quote if quote else "（なし）",
+            "quote": "「%s」（%s）" % (quote, "%s の回答から" % item["reply_to"].upper()
+                                    if item.get("quote_from") == "answer" and item.get("reply_to") else "資料の本文から")
+                     if quote else "（なし）",
+            "reply_to": self.reply_context(m, item),
             "check_command": shlex.join(argv) if argv else "（検査は無い。HTML の構造を壊していないか読み直す）",
             "answer_check_command": shlex.join(answer_argv) if answer_argv else "（検査は無い。図の文字が枠に収まっているか読み直す）",
             "skill_path": SKILL_MD,
@@ -1693,11 +1740,11 @@ class App:
             # 資料作りでは、質問したセッションの質問のツール
             "ask_tool": self.agents.get((read_json(m.origin_path) or {}).get("agent") or "claude", agent).ask_tool,
         }
-        for key, value in values.items():
-            text = text.replace("{{%s}}" % key, value)
-        # 質問は最後に埋める（質問の中の {{...}} を置き換えないため）。資料作りでは AskUserQuestion の質問と選択肢
+        # 資料作りでは AskUserQuestion の質問と選択肢
         question = ask_prompt_text((self.ask_view(m) or {}).get("questions") or []) if build else item["question"]
-        return text.replace("{{question}}", question.replace("</question>", "&lt;/question>"))
+        values["question"] = question.replace("</question>", "&lt;/question>")
+        # 一度に埋める（質問・元の回答の中の {{...}} を置き換えないため）
+        return re.sub(r"\{\{(\w+)\}\}", lambda k: values.get(k.group(1), k.group(0)), text)
 
     def agent_run(self, m, item, plan, agent):
         """エージェントに 1 件の質問を答えさせる（資料を作らせる）ための材料。書いてよいのは作業用コピー・回答・images/、
@@ -2225,7 +2272,12 @@ class Handler(SimpleHTTPRequestHandler):
                    if isinstance(sid, str) and SECTION_ID_RE.match(sid) else None)
         quote = body.get("quote")
         quote = quote.strip()[:MAX_QUOTE] if isinstance(quote, str) and quote.strip() else None
-        self.send_json(202, self.app.enqueue(m, question, section, quote))
+        reply_to = body.get("reply_to")
+        if reply_to is not None and not (isinstance(reply_to, str) and QID_RE.match(reply_to)
+                                         and self.app.reply_target(m, reply_to)):
+            return self.send_json(400, {"error": "続きの質問は、回答した質問にだけできる"})
+        quote_from = "answer" if quote and reply_to and body.get("quote_from") == "answer" else None
+        self.send_json(202, self.app.enqueue(m, question, section, quote, reply_to=reply_to, quote_from=quote_from))
 
     def post_cancel(self, m, body):
         qid = body.get("id")

@@ -27,6 +27,10 @@ body.ve-qa-open .ve-qa-toggle { display: none; }
 .ve-qa-item { margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--qa-line); border-radius: 10px; background: var(--qa-bg); }
 .ve-qa-item[data-status="failed"] { border-color: var(--qa-warn); }
 .ve-qa-item[data-status="canceled"] { opacity: .7; }
+/* 続きの質問は、元の質問のすぐ下に、字下げして並べる */
+.ve-qa-reply { margin: -8px 0 16px 18px; border-left: 4px solid var(--qa-key); }
+.ve-qa-itemtools { display: flex; justify-content: flex-end; margin-top: 8px; }
+.ve-qa-reply-btn { padding: 2px 10px; }
 .ve-qa-statusrow { display: flex; align-items: center; gap: 8px; }
 .ve-qa-statusrow .ve-qa-status { flex: 1; }
 .ve-qa-cancel { padding: 2px 10px; }
