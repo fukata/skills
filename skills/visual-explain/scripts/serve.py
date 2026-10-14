@@ -967,11 +967,25 @@ def ask_prompt_text(questions):
     return "\n".join(lines)
 
 
+def ask_headline(question):
+    """選択肢だけのページの見出し。質問の最初の文（短ければ次の文まで）で、表示は CSS で2行までに切る。
+    質問の全文は本文の節と右の欄に出るので、見出しには写さない。"""
+    line = next((l.strip() for l in question.splitlines() if l.strip()), question.strip())
+    headline = ""
+    for part in re.split(r"(?<=[。？！?!])", line):
+        headline += part
+        if len(headline.strip()) >= 20:
+            break
+    return headline.strip()
+
+
 def choice_page(questions, cwd, building, agent_name="Claude Code"):
     """質問を受けてすぐ出す、選択肢だけのページ。資料ができたら差し替わる。"""
     esc = html.escape
     with open(TEMPLATE, encoding="utf-8") as f:
         style = re.search(r"<style>.*?</style>", f.read(), re.S).group(0)
+    style += ("\n<style>header h1 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;"
+              " line-clamp: 2; overflow: hidden; }</style>")
     first = questions[0]
     title = first["header"] or first["question"][:40]
     parts = []
@@ -984,8 +998,10 @@ def choice_page(questions, cwd, building, agent_name="Claude Code"):
             if o["preview"]:
                 body += '<pre>%s</pre>' % esc(o["preview"])
             cards.append('<article class="card" id="option-%d-%d">%s</article>' % (i, j, body))
+        # ラベル（チケット番号など）が質問の文に含まれるときは、見出しに重ねて書かない
+        tag = q["header"] if q["header"] and q["header"] not in q["question"] else ""
         parts.append('<section id="question-%d"><h2>%s%s</h2>%s<div class="cards">%s</div></section>' % (
-            i, "%s · " % esc(q["header"]) if q["header"] else "", esc(q["question"]),
+            i, "%s · " % esc(tag) if tag else "", esc(q["question"]),
             '<p class="note">複数選べます。</p>' if q["multiSelect"] else "", "".join(cards)))
     lead = ("右の欄（質問と回答）で選んで送ると、答えが %s の作業に戻ります。" % agent_name
             + ("選ぶための図入りの資料を作っています。できたら、このページが差し替わります。" if building else ""))
@@ -994,7 +1010,7 @@ def choice_page(questions, cwd, building, agent_name="Claude Code"):
             '<body>\n<div class="page">\n<main>\n<header>\n<span class="badge">%s からの質問</span>\n'
             '<h1>%s</h1>\n<p class="lead">%s</p>\n<p class="note">作業ディレクトリ: <code>%s</code> · %s</p>\n</header>\n'
             '%s\n</main>\n</div>\n</body>\n</html>\n' % (
-                esc(title), style, esc(agent_name), esc(first["question"]), esc(lead), esc(cwd),
+                esc(title), style, esc(agent_name), esc(ask_headline(first["question"])), esc(lead), esc(cwd),
                 esc(time.strftime("%Y-%m-%d %H:%M")),
                 "\n".join(parts)))
 

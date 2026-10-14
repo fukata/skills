@@ -1209,6 +1209,27 @@ class AskTest(ServeTestBase):
         asks = json.loads(self.req("GET", "/__qa/asks")[2])["asks"]
         self.assertEqual(sorted(a["agent_name"] for a in asks), ["Claude Code", "Codex"])
 
+    def test_headline_is_the_leading_sentence_not_the_whole_question(self):
+        long = ("【DEV-1】拠点切替後に元のユーザーが削除された場合の振る舞いをどれにしますか？"
+                "（状態ごとに検討した結果。①は切り戻せる。②は戻る先が無い）")
+        self.assertEqual(serve.ask_headline(long), "【DEV-1】拠点切替後に元のユーザーが削除された場合の振る舞いをどれにしますか？")
+        # 最初の文が短ければ次の文まで、改行があれば最初の行まで、句点が無ければそのまま
+        self.assertEqual(serve.ask_headline("確認です。この変更をどのファイルに入れますか？補足です。"),
+                         "確認です。この変更をどのファイルに入れますか？")
+        self.assertEqual(serve.ask_headline("\n どの案にしますか\n案Aは速い"), "どの案にしますか")
+        self.assertEqual(serve.ask_headline("どちらの案にしますか？"), "どちらの案にしますか？")
+        self.start()
+        questions = json.loads(json.dumps(QUESTIONS))
+        questions[0].update(question=long, header="DEV-1")
+        status, reg = self.register(questions, build="never")
+        self.assertEqual(status, 201, reg)
+        page = self.req("GET", "/" + reg["doc"])[2].decode()
+        self.assertIn("<h1>【DEV-1】拠点切替後に元のユーザーが削除された場合の振る舞いをどれにしますか？</h1>", page)
+        self.assertIn("-webkit-line-clamp: 2", page)
+        # 全文は本文の節に出る。質問の文に含まれるラベルは重ねず、含まれないラベルは残す
+        self.assertIn("<h2>%s</h2>" % long, page)
+        self.assertIn("<h2>範囲 · 直す所は？</h2>", page)
+
     def test_shows_the_choices_and_builds_a_doc_from_the_session(self):
         os.makedirs(os.path.join(self.claude_home, "projects", "-some-project"))
         with open(os.path.join(self.claude_home, "projects", "-some-project", "origin-ask.jsonl"), "w"):

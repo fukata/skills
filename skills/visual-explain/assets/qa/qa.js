@@ -694,7 +694,9 @@
     (a.questions || []).forEach(function (q, i) {
       var name = 've-qa-ask-' + i;
       var box = el('fieldset', { class: 've-qa-ask-q', 'data-question': String(i) },
-        [el('legend', {}, q.header ? [el('span', { class: 've-qa-tag', text: q.header }), ' ' + q.question] : [q.question])]);
+        // ラベル（チケット番号など）が質問の文に含まれるときは、小札に重ねて出さない
+        [el('legend', {}, q.header && q.question.indexOf(q.header) < 0
+          ? [el('span', { class: 've-qa-tag', text: q.header }), ' ' + q.question] : [q.question])]);
       if (q.multiSelect) box.appendChild(el('p', { class: 've-qa-meta', text: '複数選べます' }));
       q.options.forEach(function (o, j) {
         var id = name + '-' + j;
