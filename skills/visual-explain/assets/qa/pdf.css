@@ -1,0 +1,11 @@
+/* visual-explain の「PDF をダウンロード」（pdf.js が資料の .toolbar に置く。無い資料では本文の先頭の .ve-pdfbar に置く） */
+.ve-pdf { margin-left: 14px; padding: 3px 12px; border: 1px solid #1d5f9e; border-radius: 999px; background: #fff;
+          color: #1d5f9e; font: inherit; font-size: .85rem; cursor: pointer; }
+.ve-pdf:hover { background: #e6f0fa; }
+.ve-pdf:disabled { opacity: .6; cursor: progress; }
+.ve-pdf:focus-visible { outline: 3px solid #1d5f9e; outline-offset: 2px; }
+.ve-pdfbar { display: flex; justify-content: flex-end; margin: 0 0 8px; }
+.ve-pdfbar .ve-pdf { margin-left: 0; }
+@media print {
+  .ve-pdf, .ve-pdfbar { display: none !important; }
+}

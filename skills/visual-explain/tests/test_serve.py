@@ -9,6 +9,7 @@ import http.client
 import importlib.util
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -1008,6 +1009,73 @@ class CodexAnswerTest(ServeTestBase):
         self.assertEqual(out.returncode, 0, out.stderr)
         origin = json.loads(self.read("qa", "origin.json"))
         self.assertEqual((origin["agent"], origin["session_id"], origin["config_dir"]), ("codex", "thread-1", None))
+
+
+class PdfTest(ServeTestBase):
+    """資料を PDF にしてダウンロードする。Chrome は代役（--print-to-pdf の先に書いて、渡された引数を残す）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.fake = os.path.join(self.tmp, "fake-chrome.py")
+        with open(self.fake, "w", encoding="utf-8") as f:
+            f.write("import json, sys\n"
+                    "out = [a.split('=', 1)[1] for a in sys.argv if a.startswith('--print-to-pdf=')][0]\n"
+                    "open(out, 'wb').write(b'%PDF-1.4 ' + json.dumps(sys.argv[1:]).encode())\n")
+        self.saved = serve._chrome
+        serve._chrome = (sys.executable, [self.fake])
+
+    def tearDown(self):
+        serve._chrome = self.saved
+        super().tearDown()
+
+    def test_downloads_the_document_file_as_pdf(self):
+        self.start()
+        status, headers, body = self.req("GET", "/__qa/pdf?doc=" + DOC)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(headers["content-type"], "application/pdf")
+        self.assertTrue(headers["content-disposition"].startswith("attachment;"), headers)
+        self.assertIn("filename*=UTF-8''", headers["content-disposition"])
+        self.assertTrue(body.startswith(b"%PDF"))
+        argv = json.loads(body[len(b"%PDF-1.4 "):])
+        # 質問欄を差し込んだページではなく、資料のファイルそのものを印刷する
+        self.assertEqual(argv[-1], pathlib.Path(os.path.join(self.material, "explanation.html")).as_uri())
+        self.assertIn("--no-pdf-header-footer", argv)
+
+    def test_unknown_document_is_404(self):
+        self.start()
+        self.assertEqual(self.req("GET", "/__qa/pdf?doc=topic/nothing.html")[0], 404)
+        self.assertEqual(self.req("GET", "/__qa/pdf?doc=../etc/passwd")[0], 404)
+
+    def test_without_chrome_tells_the_page_to_print(self):
+        serve._chrome = None
+        saved = serve.find_chrome
+        serve.find_chrome = lambda: None
+        try:
+            self.start()
+            status, _, body = self.req("GET", "/__qa/pdf?doc=" + DOC)
+        finally:
+            serve.find_chrome = saved
+        self.assertEqual(status, 503)
+        self.assertIn("Chrome", json.loads(body)["error"])
+
+    def test_page_has_the_button_with_or_without_qa(self):
+        for qa in (True, False):
+            with self.subTest(qa=qa):
+                self.start(qa=qa)
+                _, headers, page = self.req("GET", "/" + DOC)
+                page = page.decode("utf-8")
+                self.assertIn('<script src="/__qa/pdf.js" defer data-doc="%s"></script>' % DOC, page)
+                self.assertIn('href="/__qa/pdf.css"', page)
+                self.assertEqual("/__qa/qa.js" in page, qa)
+                # 質問を受け付けない配信は、これまでどおり資料に CSP を付けない
+                self.assertEqual("content-security-policy" in headers, qa)
+                for asset in ("/__qa/pdf.js", "/__qa/pdf.css"):
+                    self.assertEqual(self.req("GET", asset, cookie=False)[0], 200)
+                self.assertEqual(self.req("GET", "/__qa/pdf?doc=" + DOC)[0], 200)
+                self.httpd.shutdown()
+                self.httpd.server_close()
+                self.app.stop()
+                self.httpd = self.app = None
 
 
 class PanelWidthTest(ServeTestBase):

@@ -17,9 +17,11 @@ import functools
 import hashlib
 import hmac
 import html
+import importlib.util
 import ipaddress
 import json
 import os
+import pathlib
 import queue
 import re
 import secrets
@@ -29,6 +31,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -38,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import quote as url_quote
 
 try:
     import fcntl  # 資料ごとの排他（Windows には無いので、その場合は排他しない）
@@ -71,11 +75,11 @@ ALL_INTERFACES = {"", "0.0.0.0", "::", "[::]"}
 # 親のエージェントのセッションから引き継がない環境変数（入れ子のセッションと誤認させない）
 PARENT_ENV = agents_mod.ClaudeAgent.parent_env + agents_mod.CodexAgent.parent_env
 MCP_LIST_TIMEOUT = agents_mod.MCP_LIST_TIMEOUT
-# 資料の HTML に付ける。質問欄（同じ配信元の qa.js）以外のスクリプトと、外部の資源を読み込ませない
+# 質問を受け付ける資料の HTML に付ける。同じ配信元のスクリプト（qa.js・pdf.js）以外と、外部の資源を読み込ませない
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'")
 BODY_END_RE = re.compile(r"</body\s*>", re.I)
-PUBLIC_ASSETS = ("/__qa/qa.js", "/__qa/qa.css", "/__qa/inbox.js")
+PUBLIC_ASSETS = ("/__qa/qa.js", "/__qa/qa.css", "/__qa/inbox.js", "/__qa/pdf.js", "/__qa/pdf.css")
 PRIVATE_MESSAGE = "この配信は、案内された URL（?k= 付き）で開いたブラウザにだけ見せる。受け箱の URL で開き直してください。\n"
 SESSION_ID_RE = agents_mod.SESSION_ID_RE
 SECTION_ID_RE = re.compile(r"^[A-Za-z0-9_:.-]{1,200}$")
@@ -625,6 +629,51 @@ class Material:
 
     def answer_path(self, qid):
         return os.path.join(self.answers_dir, qid + ".html")
+
+
+PDF_TIMEOUT = 120
+PDF_LOCK = threading.Semaphore(2)  # 同時に動かす Chrome の数
+_chrome = None
+
+
+def find_chrome():
+    """PDF を作る Chrome。探し方は検査（check-explanation.py）と同じ。見つかったものだけ覚える（後から入れてもよい）。"""
+    global _chrome
+    if _chrome is None:
+        spec = importlib.util.spec_from_file_location("check_explanation", DEFAULT_CHECK)
+        check = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(check)
+        found = check.find_chrome(None)
+        if found:
+            _chrome = (found, check.headless_flag(found))
+    return _chrome
+
+
+def render_pdf(path):
+    """資料を印刷の CSS（A4 縦）で PDF にする。質問欄を差し込む前の、資料のファイルそのものを使う。
+    Chrome が無ければ None。作れなければ RuntimeError。"""
+    chrome = find_chrome()
+    if not chrome:
+        return None
+    exe, flags = chrome
+    with PDF_LOCK:
+        work = tempfile.mkdtemp(prefix="ve-pdf-")
+        try:
+            out = os.path.join(work, "doc.pdf")
+            try:
+                r = subprocess.run([exe] + flags + [
+                    "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                    "--user-data-dir=" + os.path.join(work, "profile"), "--no-pdf-header-footer",
+                    "--virtual-time-budget=3000", "--print-to-pdf=" + out, pathlib.Path(os.path.abspath(path)).as_uri()],
+                    capture_output=True, timeout=PDF_TIMEOUT)
+            except (OSError, subprocess.SubprocessError) as e:
+                raise RuntimeError("Chrome を動かせなかった: %s" % e)
+            if not os.path.isfile(out) or os.path.getsize(out) == 0:
+                raise RuntimeError("PDF ができなかった: %s" % r.stderr.decode("utf-8", "replace").strip()[-300:])
+            with open(out, "rb") as f:
+                return f.read()
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def resolve_doc(cfg, rel):
@@ -2097,7 +2146,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.blocked(url.path):
             return self.send_error(404)
         fs = self.translate_path(url.path)
-        if self.app.cfg.qa is not False and os.path.basename(fs) == self.app.cfg.doc_name and os.path.isfile(fs):
+        if os.path.basename(fs) == self.app.cfg.doc_name and os.path.isfile(fs):
             return self.send_doc(fs)
         return super().do_GET()
 
@@ -2166,14 +2215,20 @@ class Handler(SimpleHTTPRequestHandler):
         rel = os.path.relpath(fs, self.app.cfg.root).replace(os.sep, "/")
         # 覚えた質問欄の幅で開く（どの配信サーバー・配信元の資料でも同じ幅にする）
         width = read_viewer_prefs(self.app.cfg.prefs).get("width")
-        snippet = ('\n<link rel="stylesheet" href="/__qa/qa.css">\n'
-                   '<script src="/__qa/qa.js" defer data-doc="%s" data-rev="%s"%s></script>\n'
-                   % (html.escape(rel, quote=True), bytes_rev(raw), ' data-width="%d"' % width if width else ""))
+        doc = html.escape(rel, quote=True)
+        # PDF のボタンは、質問を受け付けない配信（--no-qa）でも出す
+        snippet = ('\n<link rel="stylesheet" href="/__qa/pdf.css">\n'
+                   '<script src="/__qa/pdf.js" defer data-doc="%s"></script>\n' % doc)
+        if self.app.cfg.qa is not False:
+            snippet += ('<link rel="stylesheet" href="/__qa/qa.css">\n'
+                        '<script src="/__qa/qa.js" defer data-doc="%s" data-rev="%s"%s></script>\n'
+                        % (doc, bytes_rev(raw), ' data-width="%d"' % width if width else ""))
         text = raw.decode("utf-8", "replace")
         ends = list(BODY_END_RE.finditer(text))
         i = ends[-1].start() if ends else len(text)
         text = text[:i] + snippet + text[i:]
-        self.send_bytes(200, text.encode("utf-8"), "text/html; charset=utf-8", headers=[("Content-Security-Policy", CSP)])
+        headers = [("Content-Security-Policy", CSP)] if self.app.cfg.qa is not False else []
+        self.send_bytes(200, text.encode("utf-8"), "text/html; charset=utf-8", headers=headers)
 
     def send_window(self, query):
         """質問欄だけを別ウィンドウで開くページ。中身は qa.js が組み立て、質問と回答は状態の API から読む。"""
@@ -2190,6 +2245,24 @@ class Handler(SimpleHTTPRequestHandler):
                 '</body>\n</html>\n' % (html.escape(title), html.escape(m.rel, quote=True)))
         self.send_bytes(200, body.encode("utf-8"), "text/html; charset=utf-8", headers=[("Content-Security-Policy", CSP)])
 
+    def send_pdf(self, query):
+        """資料を PDF にして返す。資料のページを見られる人なら誰でも取れる（資料と同じ扱い）。"""
+        m = resolve_doc(self.app.cfg, (query.get("doc") or [None])[0])
+        if not m:
+            return self.send_json(404, {"error": "資料が見つからない"})
+        try:
+            pdf = render_pdf(m.path)
+        except RuntimeError as e:
+            return self.send_json(500, {"error": str(e)})
+        if pdf is None:
+            return self.send_json(503, {"error": "配信しているマシンに Chrome が無いので PDF を作れない"})
+        with open(m.path, "rb") as f:
+            found = re.search(r"<title[^>]*>(.*?)</title>", f.read(64 * 1024).decode("utf-8", "replace"), re.I | re.S)
+        title = html.unescape(re.sub(r"\s+", " ", found.group(1)).strip()) if found else ""
+        name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", title)[:100] or os.path.basename(m.dir) or "document"
+        disposition = "attachment; filename=\"document.pdf\"; filename*=UTF-8''%s" % url_quote(name + ".pdf", safe="")
+        self.send_bytes(200, pdf, "application/pdf", headers=[("Content-Disposition", disposition)])
+
     def send_inbox(self):
         """エージェントの質問（AskUserQuestion・request_user_input）の受け箱。開いておくと、質問が来たときにその資料を開く（中身は inbox.js が作る）。"""
         body = ('<!doctype html>\n<html lang="ja">\n<head>\n<meta charset="utf-8">\n'
@@ -2199,7 +2272,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_bytes(200, body.encode("utf-8"), "text/html; charset=utf-8", headers=[("Content-Security-Policy", CSP)])
 
     def api_get(self, path, query):
-        if path in ("/__qa/qa.js", "/__qa/qa.css", "/__qa/inbox.js"):
+        if path in PUBLIC_ASSETS:
             name = path.rsplit("/", 1)[1]
             with open(os.path.join(ASSET_DIR, name), "rb") as f:
                 body = f.read()
@@ -2207,6 +2280,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_bytes(200, body, ctype, cache="no-cache")
         if path == "/__qa/panel":
             return self.send_window(query)
+        if path == "/__qa/pdf":
+            return self.send_pdf(query)
         if path == "/__qa/inbox":
             if self.app.cfg.private:
                 # 受け箱を開いたことがある印。auto の人は、これ以降の質問を常にページで待つ（ask_effective_mode）
