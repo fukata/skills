@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { createHash } = require('node:crypto');
 const { SYSTEM_DEFAULT_KEY } = require('./decide.js');
 const { spawnSync } = require('node:child_process');
 
@@ -75,7 +76,16 @@ async function listClaudeAccounts(client, { snapshotPath = systemDefaultSnapshot
     accountIds.push(SYSTEM_DEFAULT_KEY);
     emails[SYSTEM_DEFAULT_KEY] = `${systemDefault.email} (system default)`;
   }
+  // 認証情報そのものは保存せず、アカウントと組織の組合せを識別する。
+  const identities = {};
+  for (const account of [...accounts, ...(systemDefault ? [{ id: SYSTEM_DEFAULT_KEY, ...systemDefault }] : [])]) {
+    if (account.email && account.organizationUuid) {
+      identities[account.id] = createHash('sha256')
+        .update(JSON.stringify([account.email, account.organizationUuid])).digest('hex');
+    }
+  }
   return {
+    identities,
     accountIds,
     activeId: claude.activeAccountId ?? null,
     emails

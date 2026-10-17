@@ -77,3 +77,15 @@ test('System Default への切替が反映されなければ失敗する', async
   const f = fixture(t);
   await assert.rejects(selectClaudeAccount(f.client, SYSTEM_DEFAULT_KEY), /did not take effect/);
 });
+
+
+test('認証先の識別は同じメールでも組織で分かれ、トークン更新では変わらない', async (t) => {
+  const f = fixture(t, snapshot());
+  const before = await listClaudeAccounts(f.client, f);
+  assert.notEqual(before.identities.team, before.identities[SYSTEM_DEFAULT_KEY]);
+  fs.writeFileSync(f.snapshotPath, snapshot().replace('test-only', 'rotated-token'));
+  assert.deepEqual((await listClaudeAccounts(f.client, f)).identities, before.identities);
+  fs.writeFileSync(f.snapshotPath, snapshot('different-org'));
+  assert.notEqual((await listClaudeAccounts(f.client, f)).identities[SYSTEM_DEFAULT_KEY], before.identities[SYSTEM_DEFAULT_KEY]);
+  assert.equal(JSON.stringify(before).includes('test-only'), false);
+});

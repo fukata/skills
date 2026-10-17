@@ -233,8 +233,8 @@ test('decide: 把握前から動いているプロセスでも、アクティブ
   assert.deepEqual(result.state.limited.a, { at: NOW - MINUTE, until: UNTIL });
 });
 
-test('decide: 切替先がすべて上限中なら何もしない（アクティブの上限は記録する）', () => {
-  const state = knownState({ limited: { b: { at: NOW - HOUR, until: NOW + HOUR } } });
+test('decide: 切替先がすべて最近確認した上限なら何もしない（アクティブの上限は記録する）', () => {
+  const state = knownState({ limited: { b: { at: NOW - MINUTE, until: NOW + HOUR } } });
   const result = decide(input({ state }));
   assert.equal(result.action, 'give-up');
   assert.equal(result.reason, 'no-available-account');
@@ -376,11 +376,11 @@ test('全アカウント上限: 各アカウントを 1 回ずつ試したら止
   assert.deepEqual(three.actions, ['switch', 'switch', 'give-up']);
 });
 
-test('全アカウント上限: 止まった後は、上限が解けるまで何度呼ばれても再開しない', () => {
+test('全アカウント上限: 止まった後は、再試行間隔内は何度呼ばれても再開しない', () => {
   const stopped = runUntilGiveUp({ accountIds: ['a', 'b'], activeId: 'a', state: knownState() });
   let { state } = stopped;
-  // 止まったセッションと、切替前から動いていた別のセッションが、1 分おきに 4 時間失敗し続ける
-  for (let minute = 1; minute <= 240; minute++) {
+  // 止まったセッションと、切替前から動いていた別のセッションが、1 分おきに 29 分間失敗し続ける
+  for (let minute = 1; minute <= 29; minute++) {
     const now = stopped.now + minute * MINUTE;
     for (const [sessionId, processStartedAt] of [['s1', stopped.processStartedAt], ['s2', NOW - HOUR]]) {
       const result = decide({ now, accountIds: ['a', 'b'], activeId: stopped.activeId, state, sessionId, processStartedAt, limitUntil: NOW + 5 * HOUR });
@@ -390,7 +390,7 @@ test('全アカウント上限: 止まった後は、上限が解けるまで何
   }
 });
 
-test('全アカウント上限: 解除時刻を読めず 1 時間ごとに試し直す場合でも、再開は 1 時間に 1 回まで', () => {
+test('全アカウント上限: 解除時刻を読めず 1 時間ごとに試し直す場合でも、再開は 30 分に 1 回まで', () => {
   // 5 分おきに 12 時間、同じセッションが失敗し続ける（実際にはアカウントは一度も回復しない）
   let run = runUntilGiveUp({ accountIds: ['a', 'b'], activeId: 'a', state: knownState(), limitFor: FALLBACK_LIMIT_MS });
   let restarts = run.actions.filter((action) => action !== 'give-up').length;
@@ -406,5 +406,61 @@ test('全アカウント上限: 解除時刻を読めず 1 時間ごとに試し
     });
     restarts += run.actions.filter((action) => action !== 'give-up').length;
   }
-  assert.ok(restarts <= 13, `restarts=${restarts}`);
+  assert.ok(restarts <= 25, `restarts=${restarts}`);
+});
+
+
+test('古い週間制限: System Default を試すが成功と決めつけず記録を残す', () => {
+  const state = knownState({ limited: { [SYSTEM_DEFAULT_KEY]: { at: NOW - DAY, until: NOW + DAY } } });
+  const result = decide(input({ accountIds: ['a', SYSTEM_DEFAULT_KEY], state }));
+  assert.equal(result.reason, 'stale-limit-probe');
+  assert.equal(result.target, SYSTEM_DEFAULT_KEY);
+  assert.deepEqual(result.state.probe, { key: SYSTEM_DEFAULT_KEY, at: NOW, pending: true });
+  assert.deepEqual(result.state.limited[SYSTEM_DEFAULT_KEY], state.limited[SYSTEM_DEFAULT_KEY]);
+  // 切替前から動いていた別端末は、古い記録を根拠に切り戻さず再開する。
+  const old = decide(input({ accountIds: ['a', SYSTEM_DEFAULT_KEY], activeId: null,
+    state: result.state, sessionId: 'other', now: NOW + MINUTE }));
+  assert.equal(old.action, 'resume');
+  // 再開後も制限なら記録を更新して止まる。
+  const failed = decide(input({ accountIds: ['a', SYSTEM_DEFAULT_KEY], activeId: null,
+    state: old.state, now: NOW + 2 * MINUTE, processStartedAt: NOW + MINUTE, limitKind: 'weekly' }));
+  assert.equal(failed.action, 'give-up');
+  assert.equal(failed.state.probe.pending, false);
+  assert.equal(failed.state.limited[SYSTEM_DEFAULT_KEY].at, NOW + 2 * MINUTE);
+  assert.equal(failed.state.limited[SYSTEM_DEFAULT_KEY].kind, 'weekly');
+});
+
+test('古い制限: ホスト全体で別セッションも30分待ち、最も古い候補を一つ試す', () => {
+  const state = knownState({ limited: {
+    b: { at: NOW - HOUR, until: UNTIL }, c: { at: NOW - DAY, until: UNTIL }
+  } });
+  const first = decide(input({ accountIds: ['a', 'b', 'c'], state }));
+  assert.equal(first.target, 'c');
+  const retry = (minutes) => decide(input({ accountIds: ['a', 'b', 'c'], activeId: 'c',
+    state: first.state, sessionId: 'another', now: NOW + minutes * MINUTE, processStartedAt: NOW + 1 }));
+  assert.equal(retry(29).action, 'give-up');
+  assert.equal(retry(30).target, 'b');
+});
+
+test('認証先の変更: 同じキーでも組織が変われば以前の制限を適用しない', () => {
+  const state = knownState({ identities: { b: 'old-org' }, limited: { b: { at: NOW, until: UNTIL } } });
+  const result = decide(input({ state, identities: { b: 'new-org' } }));
+  assert.equal(result.target, 'b');
+  assert.equal(result.state.limited.b, undefined);
+  assert.equal(state.identities.b, 'old-org');
+  assert.equal(decide(input({ state, identities: { b: 'old-org' } })).action, 'give-up');
+});
+
+test('認証先の変更: アクティブ自身が変わったら古いプロセスの失敗を新組織に記録しない', () => {
+  const state = knownState({ identities: { a: 'old' }, limited: { a: { at: NOW, until: UNTIL } } });
+  const result = decide(input({ state, identities: { a: 'new' } }));
+  assert.equal(result.action, 'resume');
+  assert.equal(result.state.limited.a, undefined);
+});
+
+test('通常の候補があれば古い制限の再試行より優先する', () => {
+  const state = knownState({ limited: { b: { at: NOW - DAY, until: UNTIL } } });
+  const result = decide(input({ accountIds: ['a', 'b', 'c'], state }));
+  assert.equal(result.target, 'c');
+  assert.equal(result.state.probe, null);
 });

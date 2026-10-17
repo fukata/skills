@@ -11,6 +11,8 @@ const FALLBACK_LIMIT_MS = 60 * 60 * 1000;
 // 自動継続の再試行が別のアカウントの上限に当たって hook が起きたとき、解けたはずのアカウントを
 // まだ上限中と見なすと、切替を見送ってしまう
 const RESET_MARGIN_MS = 30 * 1000;
+// 古い制限記録を試し直す最短間隔（ホスト全体）
+const PROBE_INTERVAL_MS = 30 * 60 * 1000;
 // 同じセッションの再開回数を数える時間幅
 const RESUME_WINDOW_MS = 30 * 60 * 1000;
 // これより先の解除時刻は読み違いとして扱う（週次の上限でも 7 日以内に解ける）
@@ -172,7 +174,8 @@ function normalizeState(state, now) {
       sessions[id] = { ...entry };
     }
   }
-  return { active: state?.active ? { ...state.active } : null, limited, sessions };
+  return { active: state?.active ? { ...state.active } : null, limited, sessions,
+    identities: { ...state?.identities }, probe: state?.probe ? { ...state.probe } : null };
 }
 
 function isLimited(state, key, now) {
@@ -216,9 +219,19 @@ function recordResume(state, sessionId, now) {
  * @param {number} input.limitUntil 今回の上限が解ける時刻
  * @returns {{action: 'switch'|'resume'|'give-up', target?: string, reason: string, state: object}}
  */
-function decide({ now, accountIds, activeId, state, sessionId, processStartedAt, limitUntil: until }) {
+function decide({ now, accountIds, activeId, identities = {}, state, sessionId, processStartedAt, limitUntil: until, limitKind }) {
   const next = normalizeState(state, now);
   const activeKey = activeId ?? SYSTEM_DEFAULT_KEY;
+
+  // 旧形式の記録は組織を特定できないので保持し、古い記録の再試行で確認する。
+  for (const [key, identity] of Object.entries(identities)) {
+    if (next.identities[key] && next.identities[key] !== identity) {
+      delete next.limited[key];
+      if (next.active?.key === key) next.active = null;
+      if (next.probe?.key === key) next.probe.pending = false;
+    }
+    next.identities[key] = identity;
+  }
 
   const session = next.sessions[sessionId];
   const maxResumes = accountIds.length + 2;
@@ -234,21 +247,31 @@ function decide({ now, accountIds, activeId, state, sessionId, processStartedAt,
     startedBeforeKnown = processStartedAt < next.active.since;
   }
   if (!startedBeforeKnown) {
-    next.limited[activeKey] = { at: now, until };
+    next.limited[activeKey] = { at: now, until, ...(limitKind ? { kind: limitKind } : {}) };
+    if (next.probe?.key === activeKey) next.probe.pending = false;
   }
 
-  if (!isLimited(next, activeKey, now)) {
+  if (!isLimited(next, activeKey, now) || (next.probe?.key === activeKey && next.probe.pending)) {
     recordResume(next, sessionId, now);
     return { action: 'resume', reason: 'started-before-active-known', state: next };
   }
 
-  const target = nextAvailableAccount(accountIds, activeId, next, now);
+  let target = nextAvailableAccount(accountIds, activeId, next, now);
+  let probing = false;
+  if (target === null && (!next.probe || now - next.probe.at >= PROBE_INTERVAL_MS)) {
+    // 全候補が上限中のときだけ、確認が最も古い別アカウントを一つ試す。
+    target = accountIds.filter((key) => key !== activeKey &&
+      Number.isFinite(next.limited[key]?.at) && now - next.limited[key].at >= PROBE_INTERVAL_MS)
+      .sort((a, b) => next.limited[a].at - next.limited[b].at)[0] ?? null;
+    probing = target !== null;
+  }
   if (target === null) {
     return { action: 'give-up', reason: 'no-available-account', state: next };
   }
+  if (probing) next.probe = { key: target, at: now, pending: true };
   next.active = { key: target, since: now };
   recordResume(next, sessionId, now);
-  return { action: 'switch', target, reason: startedBeforeKnown ? 'active-known-limited' : 'active-limited', state: next };
+  return { action: 'switch', target, reason: probing ? 'stale-limit-probe' : startedBeforeKnown ? 'active-known-limited' : 'active-limited', state: next };
 }
 
 module.exports = {
@@ -256,6 +279,7 @@ module.exports = {
   FALLBACK_LIMIT_MS,
   RESET_MARGIN_MS,
   RESUME_WINDOW_MS,
+  PROBE_INTERVAL_MS,
   parseLimitMessage,
   resolveResetTime,
   limitUntil,

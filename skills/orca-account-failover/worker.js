@@ -309,7 +309,9 @@ async function main() {
     const decision = await withLock(async () => {
       const accounts = await listClaudeAccounts(client);
       const decided = decide({
-        now,
+        now: Date.now(),
+        identities: accounts.identities,
+        limitKind: limit.kind,
         accountIds: accounts.accountIds,
         activeId: accounts.activeId,
         state: loadState(),
@@ -325,12 +327,25 @@ async function main() {
         limitUntil: new Date(until.at).toISOString(),
         resetParsed: until.parsed,
         active: accounts.emails[accounts.activeId ?? SYSTEM_DEFAULT_KEY] ?? 'system default',
-        target: decided.target ? accounts.emails[decided.target] : undefined
+        target: decided.target ? accounts.emails[decided.target] : undefined,
+        probe: decided.state.probe,
+        candidates: accounts.accountIds.map((key) => ({
+          key, identity: accounts.identities[key],
+          limited: decided.state.limited[key] ?? null,
+          reason: key === decided.target ? decided.reason :
+            key === (accounts.activeId ?? SYSTEM_DEFAULT_KEY) ? 'active-account' :
+              decided.state.limited[key]?.until > Date.now() ? 'cached-limit' : 'available'
+        }))
       });
       if (DRY_RUN) {
         return decided;
       }
       if (decided.action === 'switch') {
+        if (decided.reason === 'stale-limit-probe') {
+          // RPC が失敗しても他の端末から同じ試行を繰り返さない。実際の切替成功までは active を進めない。
+          saveState({ ...decided.state, active: loadState().active ?? null,
+            probe: { ...decided.state.probe, pending: false } });
+        }
         await selectClaudeAccount(client, decided.target);
         log('switched', { ...context, to: accounts.emails[decided.target] });
       }
