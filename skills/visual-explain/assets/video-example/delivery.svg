@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-labelledby="title">
+<title id="title">一つの台本から、説明動画、字幕ファイル、解説原稿を作る</title>
+<rect width="960" height="300" fill="#f7f9fc"/>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#286caf"/></marker></defs>
+<g font-family="system-ui,sans-serif" fill="#203044" font-size="27" text-anchor="middle">
+<text x="480" y="40" font-size="25">見る人に合わせて、動画でも文字でも確認できる</text>
+<rect x="30" y="120" width="220" height="95" rx="14" fill="#e8f1fb" stroke="#286caf" stroke-width="2"/>
+<text x="140" y="160">一つの台本</text><text x="140" y="192" font-size="21">図・要点・解説</text>
+<g fill="none" stroke="#286caf" stroke-width="2"><path d="M255 166H335V96H420" marker-end="url(#a)"/>
+<path d="M335 166H420" marker-end="url(#a)"/><path d="M335 166V236H420" marker-end="url(#a)"/></g>
+<g fill="#e6f7f1" stroke="#24846e" stroke-width="2"><rect x="440" y="68" width="460" height="55" rx="10"/>
+<rect x="440" y="138" width="460" height="55" rx="10"/><rect x="440" y="208" width="460" height="55" rx="10"/></g>
+<text x="670" y="105">動画：再生・ダウンロード</text><text x="670" y="175">字幕：音なしでも確認</text>
+<text x="670" y="245">解説原稿：読み返す・直す</text></g></svg>

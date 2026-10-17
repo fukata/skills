@@ -246,6 +246,13 @@ else
   ng "setup.sh / teardown.sh のテスト"; grep FAIL "$TMP/setup.log"
 fi
 
+echo "== 説明動画（Chrome・FFmpeg があれば実際に出力し、同期も確かめる）"
+if python3 -I "$HERE/test_video.py" >"$TMP/video.log" 2>&1; then
+  ok "make-video.py のテスト（$(grep -Eo 'Ran [0-9]+ tests' "$TMP/video.log")$(grep -Eo 'skipped=[0-9]+' "$TMP/video.log" | sed 's/^/, /')）"
+else
+  ng "make-video.py のテスト"; cat "$TMP/video.log"
+fi
+
 # 失敗したときは、要約に出ない全文（トレースバックなど）を残せる。CI はこれを成果物として保存する
 if [ "$fail" != 0 ] && [ -n "${VISUAL_EXPLAIN_TEST_LOGS:-}" ]; then
   mkdir -p "$VISUAL_EXPLAIN_TEST_LOGS" && cp "$TMP"/*.log "$VISUAL_EXPLAIN_TEST_LOGS"/ 2>/dev/null

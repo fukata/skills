@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-labelledby="title">
+<title id="title">架空の保存操作。編集中から保存を経て、変更を反映した一覧へ戻る</title>
+<rect width="960" height="300" fill="#f7f9fc"/>
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#286caf"/></marker></defs>
+<g font-family="system-ui,sans-serif" text-anchor="middle" fill="#203044">
+<text x="480" y="46" font-size="25">架空の操作例：変更を保存する</text>
+<g fill="#e8f1fb" stroke="#286caf" stroke-width="2"><rect x="25" y="105" width="230" height="110" rx="14"/>
+<rect x="365" y="105" width="230" height="110" rx="14"/>
+<rect x="705" y="105" width="230" height="110" rx="14" fill="#e6f7f1" stroke="#24846e"/>
+<path d="M260 160H350" marker-end="url(#a)"/><path d="M600 160H690" marker-end="url(#a)"/></g>
+<text x="140" y="172" font-size="30">編集中</text><text x="480" y="172" font-size="30">変更を保存</text>
+<text x="820" y="172" font-size="30">一覧へ戻る</text>
+<text x="305" y="136" font-size="19">保存を選ぶ</text><text x="645" y="136" font-size="19">保存成功</text>
+<text x="480" y="270" font-size="23" fill="#24846e">確認すること：変更した内容が一覧に反映されているか</text></g></svg>

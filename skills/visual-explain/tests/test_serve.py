@@ -145,6 +145,39 @@ class ServeTestBase(unittest.TestCase):
 
 
 class StaticTest(ServeTestBase):
+    def test_video_range_requests_and_head(self):
+        data = bytes(range(256))
+        with open(os.path.join(self.material, "movie.mp4"), "wb") as out:
+            out.write(data)
+        self.start()
+        for value, expected, content_range in [
+            ("bytes=16-31", data[16:32], "bytes 16-31/256"),
+            ("bytes=250-", data[250:], "bytes 250-255/256"),
+            ("bytes=-8", data[-8:], "bytes 248-255/256"),
+            ("bytes=250-999", data[250:], "bytes 250-255/256")]:
+            with self.subTest(value=value):
+                status, headers, body = self.req("GET", "/topic/movie.mp4", headers={"Range": value}, cookie=False)
+                self.assertEqual(status, 206)
+                self.assertEqual(body, expected)
+                self.assertEqual(headers["content-range"], content_range)
+                self.assertEqual(int(headers["content-length"]), len(expected))
+                self.assertEqual(headers["content-type"], "video/mp4")
+        for value in ["bytes=256-", "bytes=8-2", "bytes=-0", "bytes=-", "bytes=0-1,8-9"]:
+            self.assertEqual(self.req("GET", "/topic/movie.mp4", headers={"Range": value})[0], 416)
+        status, headers, body = self.req("HEAD", "/topic/movie.mp4")
+        self.assertEqual((status, headers["accept-ranges"], headers["content-length"], body), (200, "bytes", "256", b""))
+        status, _, body = self.req("GET", "/topic/movie.mp4", headers={"Range": "bytes=0-3", "If-Range": '"old"'})
+        self.assertEqual((status, body), (200, data))
+
+    def test_private_video_and_internal_files_still_require_authorization(self):
+        self.write("movie.mp4", "動画")
+        os.makedirs(os.path.join(self.material, "qa"), exist_ok=True)
+        self.write("qa/private.mp4", "内部ファイル")
+        self.start(private=True)
+        self.assertEqual(self.req("GET", "/topic/movie.mp4", headers={"Range": "bytes=0-1"}, cookie=False)[0], 401)
+        self.assertEqual(self.req("HEAD", "/topic/movie.mp4", cookie=False)[0], 401)
+        self.assertEqual(self.req("GET", "/topic/qa/private.mp4", headers={"Range": "bytes=0-1"})[0], 404)
+
     def test_injects_widget_only_into_the_doc(self):
         self.start()
         status, h, body = self.req("GET", "/" + DOC, cookie=False)

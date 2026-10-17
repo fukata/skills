@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-labelledby="title">
+<title id="title">図で関係を見せ、テロップで要点、音声と字幕で解説を伝える</title>
+<rect width="960" height="300" fill="#f7f9fc"/>
+<g font-family="system-ui,sans-serif" text-anchor="middle">
+<text x="480" y="48" font-size="26" fill="#203044">見る場所と、理解の手がかりをそろえる</text>
+<g stroke-width="2"><rect x="25" y="88" width="280" height="152" rx="16" fill="#e8f1fb" stroke="#286caf"/>
+<rect x="340" y="88" width="280" height="152" rx="16" fill="#e6f7f1" stroke="#24846e"/>
+<rect x="655" y="88" width="280" height="152" rx="16" fill="#fff2dd" stroke="#b27c28"/></g>
+<g fill="#203044"><text x="165" y="143" font-size="34">図</text><text x="165" y="195" font-size="23">関係・変化を見る</text>
+<text x="480" y="143" font-size="34">テロップ</text><text x="480" y="195" font-size="23">要点をつかむ</text>
+<text x="795" y="143" font-size="34">音声と字幕</text><text x="795" y="195" font-size="23">理由を理解する</text></g>
+<text x="480" y="281" font-size="21" fill="#516176">一つの場面で、同じ内容に注目する</text></g></svg>

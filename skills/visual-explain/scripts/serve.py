@@ -59,7 +59,7 @@ SKILL_MD = os.path.join(SKILL_DIR, "SKILL.md")
 TEMPLATE = os.path.join(SKILL_DIR, "assets", "explanation.html")
 BUILD_PROMPT = os.path.join(SKILL_DIR, "assets", "ask", "build-prompt.md")
 SERVE_PY = os.path.abspath(__file__)
-VERSION = "1.2.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
+VERSION = "1.3.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
 ASK_CHILD_ENV = "VISUAL_EXPLAIN_ASK_CHILD"  # 配信サーバーが動かす claude -p の印。フックはこの中の質問を扱わない
 
 QA_DIR = "qa"                 # 資料フォルダの中で質問と回答を置くフォルダ。静的配信では返さない
@@ -2148,6 +2148,8 @@ class Handler(SimpleHTTPRequestHandler):
         fs = self.translate_path(url.path)
         if os.path.basename(fs) == self.app.cfg.doc_name and os.path.isfile(fs):
             return self.send_doc(fs)
+        if os.path.isfile(fs) and os.path.splitext(fs)[1].lower() in (".mp4", ".webm"):
+            return self.send_video(fs)
         return super().do_GET()
 
     def do_HEAD(self):
@@ -2157,7 +2159,51 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_bytes(401, b"", "text/plain; charset=utf-8")
         if urlsplit(self.path).path.startswith("/__qa/") or self.blocked(urlsplit(self.path).path):
             return self.send_error(404)
+        fs = self.translate_path(urlsplit(self.path).path)
+        if os.path.isfile(fs) and os.path.splitext(fs)[1].lower() in (".mp4", ".webm"):
+            return self.send_video(fs)
         return super().do_HEAD()
+
+    def send_video(self, fs):
+        """動画の途中から再生できるよう、単一のバイト範囲要求に応じる。"""
+        with open(fs, "rb") as source:
+            size = os.fstat(source.fileno()).st_size
+            start, end, status = 0, size - 1, 200
+            requested = self.headers.get("Range")
+            # If-Range の照合には対応しないため、指定時は常に全体を返す。
+            if requested and not self.headers.get("If-Range"):
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested.strip())
+                if not match or not any(match.groups()):
+                    return self.send_bytes(416, b"", "text/plain", headers=[("Content-Range", "bytes */%d" % size)])
+                first, last = match.groups()
+                if first:
+                    start = int(first)
+                    end = min(int(last), size - 1) if last else size - 1
+                else:
+                    start = max(0, size - int(last))
+                if start > end or start >= size:
+                    return self.send_bytes(416, b"", "text/plain", headers=[("Content-Range", "bytes */%d" % size)])
+                status = 206
+            self.send_response(status)
+            self.send_header("Content-Type", self.guess_type(fs))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(max(0, end - start + 1)))
+            if status == 206:
+                self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            source.seek(start)
+            remaining = end - start + 1
+            try:
+                while remaining > 0:
+                    chunk = source.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # シークやタブを閉じたとき、ブラウザは読みかけの接続を切る。
 
     def list_directory(self, path):
         if self.app.cfg.private:  # 質問の一覧は受け箱で見る。フォルダの中身は見せない

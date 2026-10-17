@@ -22,10 +22,10 @@ jobs:
           python-version: "3.12"
       # visual-explain のブラウザを使うテストのため。検査スクリプトは Playwright のキャッシュの chrome-headless-shell を
       # 先に探す。図の文字幅を測るテストは、日本語フォントが無いと結果が変わって失敗する
-      - name: ヘッドレス Chrome と日本語フォントを入れる
+      - name: ヘッドレス Chrome・日本語フォント・動画の依存を入れる
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq fonts-noto-cjk
+          sudo apt-get install -y -qq fonts-noto-cjk ffmpeg
           npx -y playwright install --with-deps chromium-headless-shell
       - name: すべてのスキルのテスト
         run: bash test.sh

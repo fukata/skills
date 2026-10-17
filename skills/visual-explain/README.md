@@ -6,6 +6,7 @@
 - 質問への回答でも、複数の事象の関係を問う質問や長くなる回答には、文章の回答に資料を添えます。
 - 配信したページからは追加の質問ができ、配信しているマシンのエージェントが答えます。説明不足なら本文も直します。
 - エージェントの質問（Claude Code の AskUserQuestion、Codex の request_user_input）にも、資料のページで答えられます。
+- 説明動画を頼むと、図やスクショに要点のテロップ・全文字幕を添えた MP4 と再生ページを作ります。日本語の音声解説も付けられます。
 
 ## 導入
 
@@ -31,6 +32,7 @@ npx skills remove -g visual-explain
 - **Python 3**（必須）。配信サーバー・検査スクリプト・hook は標準ライブラリだけで動きます。
 - **ヘッドレス Chrome**（任意）。検査スクリプトが、図の文字のはみ出し・狭い幅・印刷での欠けを測ります。配信したページの「PDF をダウンロード」も、これで PDF を作ります。無ければその検査だけ飛ばします（`npx playwright install chromium-headless-shell` などで入ります）。chrome-headless-shell、通常の Chrome・Chromium の順に探し、起動してページを取り出せた最初のものを使います（`--chrome` か環境変数 `VISUAL_EXPLAIN_CHROME` で指定もできます）。
 - **Tailscale**（任意）。別の端末から資料を開くときの経路の一つです。無ければ SSH ポート転送で開けます。
+- **FFmpeg と日本語フォント**（動画作成時）。動画ではヘッドレス Chrome も必須です。日本語の合成音声には **ローカルの VOICEVOX エンジン**、または **Open JTalk・UTF-8 辞書・HTS 音声モデル**を使います。通常の HTML 資料の作成にはこれらの動画用依存は不要です。
 
 ## 使い方
 
@@ -43,11 +45,43 @@ npx skills remove -g visual-explain
 注文の確定から発送の手配までどう流れるの？
 このブランチで改修したAPIについて認識合わせするための資料を作成して。
 落とし所の案を作成して。
+この処理の流れを、テロップと音声解説付きの説明動画にして。
 ```
 
 図を頼んでいない質問でも、複数の事象の関係（順序・依存・分岐・対応・並行して動く仕組み）を問う場合や、回答が長くなる（見出し 3 つ以上、または表 2 つ以上）場合は、文章の回答に資料の URL を添えます。一つの事実で答えられる質問や、関係を問わない一覧では作りません。
 
 資料は既定で `visual-explain-<topic>/explanation.html` に作り、同梱の配信サーバーで配信して URL を案内します（git のリポジトリの中なら、無視される `tmp/` などを優先します）。
+
+## テロップ・音声解説付きの動画
+
+動画の依頼には、図やスクショを場面ごとに並べた MP4 と、再生ページ・字幕・解説原稿を作ります。テロップは短い要点、音声と字幕はその場面の解説です。図と文字の表示領域を分け、音声の長さに字幕と場面を合わせます。画面操作を録画する機能ではありません。
+
+音声は既定で自動選択します。起動済みの VOICEVOX を使い、なければ Docker イメージを取得・起動します。Docker が使えない、取得・合成に失敗する場合は利用可能な Open JTalk、それも使えなければテロップと解説字幕の無音動画で完成させます。動画全体で同じ方式を使い、選択した方式と切り替え理由を再生ページ・原稿・生成結果に残します。VOICEVOX の話者名は動画にも表示します。API キーは不要です。
+
+Docker 本体や Open JTalk は自動インストールしません。取得済みの Docker イメージは再利用し、自分で作ったコンテナーだけを音声生成後に削除します。既存のエンジンや他のコンテナーには触れません。初回はイメージのダウンロードが発生します。取得と起動の上限は既定300秒（`--voicevox-setup-timeout`）、文ごとの合成の上限は120秒（`--speech-timeout`）です。
+
+同梱の台本で試す例（スキルのディレクトリで実行）:
+
+```bash
+python3 scripts/make-video.py assets/video-example/story.json --out /tmp/visual-explain-video
+```
+
+無音に固定する場合は `--speech none` を追加します。この場合、VOICEVOX や Docker を調べたり起動したりしません。音声方式を固定する `--speech voicevox`・`--speech open-jtalk` は、使えなければエラーで止まります。
+
+Open JTalk に固定する例（辞書・モデルのパスは Ubuntu の例）:
+
+```bash
+python3 scripts/make-video.py assets/video-example/story.json --out /tmp/visual-explain-video-voice \
+  --speech open-jtalk \
+  --dictionary /var/lib/mecab/dic/open-jtalk/naist-jdic \
+  --voice /usr/share/hts-voice/nitech-jp-atr503-m001/nitech_jp_atr503_m001.htsvoice
+```
+
+VOICEVOX のエディターかエンジンが起動していれば、`--speech voicevox --voicevox-speaker 11` で玄野武宏・ノーマルの声を利用できます。接続先は既定で `http://127.0.0.1:50021` です。
+
+字幕は既定で切替式です。`--burn-captions` を付けると MP4 に焼き込みます。`--speech recorded` で文ごとの提供音声も使えます。自動選択でも全ての文に `audio` があれば、その提供音声を優先します。読み仮名や区切りを調整する場合は台本の `reading` に指定し、字幕と分けられます。Open JTalk の発音が異常に長くなる合成は検査し、自動選択では無音動画へ切り替えます。出力先は新しいフォルダを指定し、既存のものは上書きしません。
+
+台本の形式・依存の導入例・確認方法は [references/video.md](references/video.md)。通常の HTML 資料を作るときは動画を自動生成しません。
 
 ## ページから追加の質問をする
 
@@ -138,7 +172,7 @@ visual-explain-<topic>/
 bash skills/visual-explain/tests/run.sh
 ```
 
-python3 と git が必須です。claude と codex は代役（`tests/fixtures/fake_claude.py`・`fake_codex.py`）を使います。ヘッドレス Chrome があれば、ブラウザでの検査とページの表示も確かめます。ブラウザを使うテストは図の文字幅を測るので、日本語フォントが入っていないと失敗します。
+python3 と git が必須です。claude と codex は代役（`tests/fixtures/fake_claude.py`・`fake_codex.py`）を使います。ヘッドレス Chrome があれば、ブラウザでの検査とページの表示も確かめます。FFmpeg・ffprobe もあれば実際に短い動画を出力し、音声・字幕・場面の同期を検査します。読み上げには代役を使い、外部サービスには接続しません。ブラウザを使うテストは図の文字幅を測るので、日本語フォントが入っていないと失敗します。
 
 ## ライセンス
 

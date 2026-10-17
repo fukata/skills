@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-labelledby="title">
+<title id="title">文ごとの音声と字幕が同時に始まり、解説を終えてから場面が変わる</title>
+<rect width="960" height="300" fill="#f7f9fc"/>
+<g font-family="system-ui,sans-serif" fill="#203044" font-size="24">
+<text x="480" y="40" text-anchor="middle" font-size="25">音声を基準に、字幕と場面をそろえる</text>
+<text x="35" y="109">音声</text><text x="35" y="179">字幕</text><text x="35" y="249">図と要点</text>
+<rect x="180" y="70" width="265" height="54" rx="10" fill="#e8f1fb"/>
+<rect x="465" y="70" width="345" height="54" rx="10" fill="#e6f7f1"/>
+<rect x="180" y="140" width="265" height="54" rx="10" fill="#e8f1fb"/>
+<rect x="465" y="140" width="345" height="54" rx="10" fill="#e6f7f1"/>
+<rect x="160" y="210" width="690" height="54" rx="10" fill="#fff2dd"/>
+<g text-anchor="middle"><text x="312" y="106">解説の一文目</text><text x="637" y="106">解説の二文目</text>
+<text x="312" y="176">一文目の字幕</text><text x="637" y="176">二文目の字幕</text>
+<text x="505" y="246">解説している間、同じ場面を表示</text></g>
+<path d="M850 65V270" stroke="#b27c28" stroke-width="2"/>
+<text x="866" y="225" font-size="19">次の</text><text x="866" y="253" font-size="19">場面へ</text>
+</g></svg>
