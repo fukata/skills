@@ -404,6 +404,8 @@ class AnswerTest(ServeTestBase):
         self.assertIn("check-explanation.py", prompt)
         self.assertIn("--fragment", prompt)
         self.assertNotIn("{{", prompt)
+        # 質問の資料でなければ、背景の一覧を求めない
+        self.assertNotIn("--ask", self.app.check_argv(serve.Material(self.app.cfg, DOC), "x.html"))
 
     def test_reply_to_an_answer(self):
         self.start()
@@ -1268,6 +1270,7 @@ class AskTest(ServeTestBase):
         m = serve.Material(self.app.cfg, doc)
         self.assertIn("--repo", self.app.check_argv(m, m.draft))
         self.assertIn(self.repo, self.app.check_argv(m, m.draft))
+        self.assertIn("--ask", self.app.check_argv(m, m.draft))
         with open(m.path, encoding="utf-8") as f:
             self.assertIn("検査用の資料", f.read())
         self.assertIn("資料を書いています", [p["text"] for p in item["progress"]])

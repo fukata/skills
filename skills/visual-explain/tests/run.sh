@@ -97,6 +97,15 @@ check "pre の中の Markdown の記法はエラーにしない" "$C '$TMP/mdpre
 mut bgctx   '<section id="context">
     <h2>前提</h2>' '<section>
     <h2>背景</h2>'
+echo "== 質問の資料（--ask）"
+check "背景の一覧がそろっていれば通る"           "$C '$V' --ask --repo '$TMP/git' --no-browser | grep -q 'errors=0 warnings=0'"
+# 選択肢しか見えない質問で、なぜ聞かれているのか分からずに答えていた
+mut askbg    '<dt>聞く理由</dt>' '<dt>メモ</dt>'
+check "'askbg' は --ask で [ask-background] のエラー" "out=\$($C '$TMP/askbg/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-background\].*聞く理由' <<<\"\$out\""
+check "'askbg' は --ask が無ければ通る"          "$C '$TMP/askbg/explanation.html' --repo '$TMP/git' --no-browser | grep -q 'errors=0'"
+mut asknodl  '<dl class="terms background">' '<dl class="terms">'
+check "'asknodl' は --ask で [ask-background] のエラー" "out=\$($C '$TMP/asknodl/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-background\]' <<<\"\$out\""
+check "'noctx' は --ask で [ask-context] のエラー" "out=\$($C '$TMP/noctx/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-context\]' <<<\"\$out\""
 check "見出しが「背景」の節も前提とみなす"      "! $C '$TMP/bgctx/explanation.html' --repo '$TMP/git' --no-browser | grep -q 'WARN  \[context\]'"
 check "素のディレクトリでも識別子の欠けを拾う" "$C '$TMP/ident/explanation.html' --repo '$TMP/plain' --no-browser | grep -q 'WARN  \[identifier\]'"
 check "'term' は略語とチケット番号を 1 件ずつ出す" "out=\$($C '$TMP/term/explanation.html' --repo '$TMP/git' --no-browser); grep -q '「PdM」' <<<\"\$out\" && grep -q '「PAY-123」' <<<\"\$out\""

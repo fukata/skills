@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """check-explanation.py — visual-explain の explanation.html を機械的に検査する。
 
-  usage: check-explanation.py EXPLANATION_HTML [--repo DIR] [--ignore-ref PREFIX ...]
+  usage: check-explanation.py EXPLANATION_HTML [--ask] [--repo DIR] [--ignore-ref PREFIX ...]
                               [--inventory FILE] [--no-browser] [--chrome PATH] [--json]
                               [--print-width PX]
          check-explanation.py ANSWER_HTML --fragment [--doc EXPLANATION_HTML] [--repo DIR] ...
@@ -30,7 +30,7 @@
   - 図の無い節の 1 つの段落に、日付・時刻が 4 個以上、または矢印（→）が 2 個以上ある（日程や順番を
     文章だけで追わせている。根拠などの節は除く）
   - --inventory で渡した構成要素の名前が、資料のどこにも出てこない（網羅の抜け）
-  - 前提の節（id="context"、または見出しが「前提」「背景」）が無い
+  - 前提の節（id="context"、または見出しが「前提」「背景」）が無い（--ask ではエラー）
   - 略語・チケット番号・クラス名（PdM、ABC-123、QuoteService など）の意味が、前提の節・用語の一覧
     （dt / dd）・出てくる所の括弧のどこにも無い（事前知識の無い人には分からない。根拠などの節は除く）
   - 図のある節に要点（class="key"）が無い（重要な所と補足の見分けが付かない）
@@ -46,6 +46,10 @@ serve.py export が書き出した「読者からの質問と回答」の節（<
 --fragment: 質問欄の回答（HTML の断片）を検査する。図のはみ出し・リンク・コード参照・Markdown の記法・
 資格情報・svg の title と width だけを見る（前提・要点・用語・印刷・狭い幅は見ない）。--doc に資料を渡すと、
 資料の節へのリンクと、資料からの相対パスの画像を確かめる。
+
+--ask: AskUserQuestion（request_user_input）の質問の資料として検査する。前提の節に、質問の背景の一覧
+（<dl class="terms background">）を置き、見出し（dt）が「作業」「聞く理由」「決まっていること」「判断の軸」
+「答えた後」で始まる項目をそろえる。欠けていればエラー。選択肢だけでは、なぜ聞かれているのか分からないため。
 
 --inventory の書式: 1 行に 1 要素。「名前 | 別名 | 別名」のように | で区切ると、どれか 1 つが
 出てくれば載っているとみなす（テーブル名とモデル名など）。# で始まる行と空行は読み飛ばす。
@@ -121,6 +125,14 @@ LIST_SECTION_ITEMS = 8  # 図の無い節で、表の行と箇条書きの合計
 LIST_EXEMPT_RE = re.compile(r"根拠|出典|参考|確認範囲|注意|読者からの質問")
 EVIDENCE_RE = re.compile(r"根拠|出典|参考|確認範囲|読者からの質問")  # 確かめたい人向けの節。用語・日程の検査から外す
 CONTEXT_HEADING_RE = re.compile(r"^(?:前提|背景)")
+# 質問の資料（--ask）の背景の一覧（dl.background）にそろえる項目。dt の書き出しと、書く中身
+ASK_BACKGROUND = [
+    ("作業", "何の作業の途中か（依頼・ここまでにしたこと・いま止まっている所）"),
+    ("聞く理由", "エージェントが自分で決めずに聞く理由（仕様に無い・トレードオフ・好みなど）"),
+    ("決まっていること", "すでに決まっていること・動かせない条件（無ければ「無し」）"),
+    ("判断の軸", "何を重く見るかで答えが変わるか（速さ・保守性・互換性など）"),
+    ("答えた後", "答えた後に何をするか・後から変えやすいか"),
+]
 # 略語（PdM・API）、チケット番号（ABC-123）、クラス名（QuoteService）。大文字を 2 つ以上含む英数字の語。
 # 前後は ASCII だけで区切る（Python の \w は日本語の文字にも当たり、「のAPIを」を取りこぼすため）
 TERM_RE = re.compile(r"(?<![A-Za-z0-9_./:#@-])([A-Z][A-Z0-9]+-\d+|[A-Za-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*)"
@@ -167,6 +179,8 @@ class Doc(HTMLParser):
         self.sections = []       # h2 ごと {"heading", "line", "figures", "items", "keys"}
         self.context = False     # 前提の節（id="context" / class="context"）があるか
         self._context_depth = None  # 前提の節の要素を開いたときの stack の深さ（中にいる間だけ値を持つ）
+        self.background = None   # 前提の節の中の背景の一覧（dl.background）の dt の文字。一覧が無ければ None
+        self._background_depth = None
         self.in_export = False   # 質問と回答の記録の節の中か。中の属性と文字は資格情報の検査にだけ使う
         self.export_values = []  # (文字, 行)
 
@@ -210,6 +224,12 @@ class Doc(HTMLParser):
             self.context = True
             if self._context_depth is None and tag not in VOID_TAGS:
                 self._context_depth = len(self.stack)
+        if tag == "dl" and "background" in classes and self._context_depth is not None \
+                and self._background_depth is None:
+            self.background = self.background or []
+            self._background_depth = len(self.stack)
+        if tag == "dt" and self._background_depth is not None:
+            self.background.append("")
         if tag == "svg" and not self._in("svg"):
             self.svgs.append({"line": line, "title": False, "width": re.fullmatch(r"\s*[\d.]+\s*(?:px)?\s*",
                                                                                  a.get("width", "")) is not None,
@@ -259,6 +279,8 @@ class Doc(HTMLParser):
                 break
         if self._context_depth is not None and len(self.stack) <= self._context_depth:
             self._context_depth = None
+        if self._background_depth is not None and len(self.stack) <= self._background_depth:
+            self._background_depth = None
 
     def handle_data(self, data):
         if self._in("script") or self._in("style"):
@@ -269,6 +291,8 @@ class Doc(HTMLParser):
             return
         if self._in("h2") and self.sections:
             self.sections[-1]["heading"] += data
+        if self._background_depth is not None and self._in("dt") and self.background:
+            self.background[-1] += data
         if self._code is not None:
             self._code["text"] += data
         else:
@@ -368,6 +392,20 @@ def check_structure(doc, f, fragment=False):
             if m:
                 f.warn("context-ref", "「%s」は会話を指している。資料だけを渡された人には指す先が無いので、指すものを書く" %
                        m.group(0), t["line"])
+
+
+def check_ask(doc, f):
+    """質問の資料に、なぜ聞かれているのかが分かる背景があるか。"""
+    if not doc.context and not any(CONTEXT_HEADING_RE.match(normalize(s["heading"])) for s in doc.sections):
+        f.error("ask-context", "前提の節（id=\"context\"）が無い。何の作業の途中で、なぜこの質問が出たかを書く")
+    if doc.background is None:
+        f.error("ask-background", "前提の節に、質問の背景の一覧（<dl class=\"terms background\">）が無い。dt を %s にして書く"
+                % "・".join("「%s」" % k for k, _ in ASK_BACKGROUND))
+        return
+    heads = [normalize(t) for t in doc.background]
+    for key, meaning in ASK_BACKGROUND:
+        if not any(h.startswith(key) for h in heads):
+            f.error("ask-background", "質問の背景の一覧に「%s」が無い。%sを書く" % (key, meaning))
 
 
 def section_heading(doc, index):
@@ -1065,6 +1103,8 @@ def main():
     ap.add_argument("--json", action="store_true", help="結果を JSON で出す")
     ap.add_argument("--fragment", action="store_true",
                     help="質問欄の回答（HTML の断片）として検査する。図・リンク・コード参照・記法・資格情報だけを見る")
+    ap.add_argument("--ask", action="store_true",
+                    help="AskUserQuestion の質問の資料として検査する。前提の節の背景の一覧が欠けていればエラー")
     ap.add_argument("--doc", help="--fragment のとき、回答を表示する資料。節へのリンクと画像の相対パスをこの資料で確かめる")
     args = ap.parse_args()
 
@@ -1088,6 +1128,8 @@ def main():
             return 2
     check_links(doc, html_dir, f)
     check_structure(doc, f, fragment=args.fragment)
+    if args.ask and not args.fragment:
+        check_ask(doc, f)
     if not args.fragment:
         check_terms(doc, f)
         check_text_flow(doc, f)
