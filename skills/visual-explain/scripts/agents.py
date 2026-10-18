@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""エージェント（Claude Code・Codex）ごとに違う所をまとめる。serve.py と ask_hook.py はこれを通して呼ぶ。
+"""エージェント（Claude Code・Codex・OpenCode）ごとに違う所をまとめる。serve.py と ask_hook.py はこれを通して呼ぶ。
 
   子プロセスのコマンド（分岐・続き・新しいセッション、権限、Web と MCP）、出力の読み取り（途中経過・最終回答・
   セッションの ID）、セッションの有無と最初の依頼、MCP のサーバーの一覧、アカウントの設定フォルダの環境変数。
@@ -18,7 +18,8 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 
-SESSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,100}$")
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,100}$")  # OpenCode の会話の ID は「ses_...」なので _ も許す
+
 MCP_LIST_TIMEOUT = 60
 # 読み取りは専用のツールだけにする。git のルールは --output= や --open-files-in-pager= で書き込み・実行ができてしまう
 READ_TOOLS = ["Read", "Grep", "Glob"]
@@ -35,6 +36,12 @@ GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "codex_guard.py
 CODEX_DISABLED_FEATURES = ("multi_agent", "code_mode", "code_mode_only", "browser_use", "computer_use", "shell_zsh_fork")
 # codex の -c に dotted key のまま書ける名前（MCP サーバーの名前）
 SAFE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# OpenCode の子に使うエージェント。子だけの設定（OPENCODE_CONFIG_CONTENT）でこの名前のエージェントを定義し、
+# ツールの権限を許可リストに絞る（利用者の設定のエージェントは使わない）
+OPENCODE_CHILD_AGENT = "visual-explain-child"
+OPENCODE_CHILD_SYSTEM = ("visual-explain（図解の資料を作るスキル）の資料作りを手伝う子セッション。"
+                         "渡された指示の作業だけを行い、ほかのことはしない。")
+
 
 
 def inside(path, root):
@@ -112,6 +119,10 @@ class Agent:
         elif not keep_account:
             env.pop(self.account_env, None)
         return env
+
+    def run_env(self, run):
+        """その 1 件（run）の子プロセスにだけ足す環境変数。"""
+        return {}
 
 
 class ClaudeReader:
@@ -406,7 +417,218 @@ class CodexAgent(Agent):
         return CodexReader()
 
 
-AGENTS = {"claude": ClaudeAgent, "codex": CodexAgent}
+class OpenCodeReader:
+    """opencode run --format json の出力（1 行 1 イベント）を読む。ツールの名前と入力を Claude・Codex と
+    同じ「ツール名と入力」の形に直して途中経過にする（途中経過の文は serve.py が共通で作る）。"""
+
+    # opencode のツール名 → 途中経過を作る serve.py が知っている名前
+    TOOLS = {"read": "Read", "grep": "Grep", "glob": "Glob", "write": "Write", "edit": "Edit", "patch": "Edit",
+             "shell": "Bash", "webfetch": "WebFetch", "websearch": "WebSearch", "skill": "Skill",
+             "task": "Task", "subagent": "Task"}
+
+    def __init__(self):
+        self.session, self.text, self.failure, self.seen = None, None, None, set()
+
+    def feed(self, line):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            return []
+        if not isinstance(ev, dict):
+            return []
+        sid = ev.get("sessionID")
+        if isinstance(sid, str) and sid:
+            self.session = sid
+        part = ev.get("part") if isinstance(ev.get("part"), dict) else {}
+        kind = ev.get("type")
+        if kind == "text":
+            text = part.get("text")
+            if isinstance(text, str):
+                self.text = text  # 最後の応答（途中の説明は、後ろの応答で上書きされる）
+        elif kind == "error":
+            err = ev.get("error")
+            self.failure = str((err if isinstance(err, dict) else {}).get("message") or err or "エラー")
+        if kind != "tool_use":
+            return []
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        key = (part.get("id") or part.get("partID"), state.get("status"))
+        if key[0] is None or key in self.seen:
+            return []
+        self.seen.add(key)
+        name = self.TOOLS.get(str(part.get("tool") or ""))
+        if not name:
+            return []
+        inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+        return [(name, inp)]
+
+    def result(self, returncode, stderr, raw):
+        """(成功したか, 最後の応答, セッションの ID, 失敗の文)"""
+        if returncode != 0 or self.failure:
+            detail = self.failure or stderr.strip()[-800:] or raw.strip()[-800:] or "終了コード %d" % returncode
+            return False, "", None, "opencode が失敗した: %s" % detail
+        if not self.text:
+            return False, "", None, "opencode が失敗した: 応答が無かった"
+        return True, self.text, self.session, None
+
+
+class OpenCodeAgent(Agent):
+    key, label = "opencode", "OpenCode"
+    session_env, account_env, home_dir = "OPENCODE_SESSION_ID", "OPENCODE_CONFIG_DIR", "~/.config/opencode"
+    ask_tool, write_hint = "question", "write ツール"
+    # 親の opencode セッションから引き継がない環境変数（入れ子のセッションと誤認させない）
+    parent_env = ("OPENCODE", "OPENCODE_SESSION_ID", "OPENCODE_TERMINAL", "AI_AGENT")
+
+    def data_home(self):
+        """会話と資格情報が入っているフォルダ（設定フォルダとは別。XDG_DATA_HOME/opencode）。"""
+        base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+        return os.path.join(base, "opencode")
+
+    def db_paths(self):
+        """会話が入っている SQLite のファイル。版ごとに名前が変わるので、あるものを全部見る。"""
+        override = os.environ.get("OPENCODE_DB")
+        if override == ":memory:":
+            return []
+        if override:
+            return [override if os.path.isabs(override) else os.path.join(self.data_home(), override)]
+        return sorted(glob.glob(os.path.join(self.data_home(), "opencode*.db")))
+
+    def session_row(self, session_id):
+        """会話の 1 行（題名・作業ディレクトリ）。無ければ None。"""
+        if not SESSION_ID_RE.match(session_id or ""):
+            return None
+        for path in self.db_paths():
+            if not os.path.isfile(path):
+                continue
+            try:
+                db = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2)
+                try:
+                    return db.execute("select title, directory from session_v2 where id = ?", (session_id,)).fetchone()
+                finally:
+                    db.close()
+            except sqlite3.Error:  # 別の版の形・読み取り中のデータベース
+                continue
+        return None
+
+    def session_exists(self, session_id, home):
+        if not SESSION_ID_RE.match(session_id or ""):
+            return False
+        if self.session_row(session_id) is not None:
+            return True
+        # 会話の記録が見つからない（別のデータフォルダ等）ときは、分岐できるものとして扱う。分けられなければ
+        # serve.py が新しいセッションでやり直す
+        return not any(os.path.isfile(path) for path in self.db_paths())
+
+    def first_prompt(self, session_id, limit=5):
+        """会話の最初の依頼（session_message の 1 つ目の user）。"""
+        if not SESSION_ID_RE.match(session_id or ""):
+            return None
+        for path in self.db_paths():
+            if not os.path.isfile(path):
+                continue
+            try:
+                db = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2)
+                try:
+                    rows = db.execute("select data from session_message where session_id = ? and type = 'user'"
+                                      " order by seq limit ?", (session_id, limit)).fetchall()
+                finally:
+                    db.close()
+            except sqlite3.Error:
+                continue
+            for (data,) in rows:
+                try:
+                    msg = json.loads(data)
+                except ValueError:
+                    continue
+                text = msg.get("text") if isinstance(msg, dict) else None
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+        return None
+
+    def session_info(self, session_id, home, transcript_path=None):
+        row = self.session_row(session_id)
+        if row is None:
+            return {"prompt": None}
+        text = re.sub(r"\s+", " ", self.first_prompt(session_id) or row[0] or "").strip()
+        return {"prompt": (text[:120] + ("…" if len(text) > 120 else "")) if text else None}
+
+    def list_mcp(self, cwd, env, timeout=MCP_LIST_TIMEOUT):
+        """子の opencode では MCP のツールを許さない（サーバーごとの名前を、権限に使える形では取れないため）。
+        外部の情報源には Web だけを出す。"""
+        return []
+
+    def external_label(self, mcp_names):
+        return "Web の検索（websearch）と取得（webfetch）"
+
+    @staticmethod
+    def shell_rules(argvs):
+        """子が動かしてよい検査のコマンド。opencode は「区切りの無い文字列」で照合するので、素の形と引用した形の
+        両方を、後ろに何が付いても一致するように（* を付けて）許す。検査は python3 -I <検査> で始まるものだけ、
+        先頭 3 つまでを許す（後ろの引数は自由）。"""
+        rules = []
+        for argv in argvs:
+            if not argv:
+                continue
+            head = argv[:3] if argv[:2] == ["python3", "-I"] else argv
+            for pattern in (" ".join(head) + "*", shlex.join(head) + "*"):
+                rule = {"action": "shell", "resource": pattern, "effect": "allow"}
+                if rule not in rules:
+                    rules.append(rule)
+        return rules
+
+    @staticmethod
+    def path_rules(paths, cwd):
+        """書いてよいパス（子の作業ディレクトリから見た相対の形と、絶対の形の両方を許す）。"""
+        rules = []
+        for path in paths:
+            path = os.path.abspath(path)
+            forms = {path, os.path.realpath(path)}
+            rel = os.path.relpath(path, cwd)
+            if not rel.startswith(".."):
+                forms.add(os.path.normpath(rel))
+            for form in sorted(forms):
+                rule = {"action": "edit", "resource": form, "effect": "allow"}
+                if rule not in rules:
+                    rules.append(rule)
+        return rules
+
+    def child_config(self, run):
+        """子の opencode に渡す設定。この名前のエージェントを定義し、ツールの権限を許可リストに絞る。
+        既定ですべて断り、後ろに書いたものだけを許す（最後に一致したものが効く）。"""
+        rules = [{"action": "*", "resource": "*", "effect": "deny"},
+                 {"action": "read", "resource": "*", "effect": "allow"},
+                 {"action": "glob", "resource": "*", "effect": "allow"},
+                 {"action": "grep", "resource": "*", "effect": "allow"},
+                 {"action": "external_directory", "resource": "*", "effect": "allow"}]
+        rules += self.path_rules(run.write_files, run.cwd)
+        rules += self.path_rules([d.rstrip("/") + "/*" for d in run.write_dirs], run.cwd)
+        rules += self.shell_rules(run.check_argvs)
+        if not run.local_only:
+            rules += [{"action": "webfetch", "resource": "*", "effect": "allow"},
+                      {"action": "websearch", "resource": "*", "effect": "allow"}]
+        return {"agents": {OPENCODE_CHILD_AGENT: {"description": "visual-explain の資料を作る子（配信サーバーが起動する）",
+                                                  "system": OPENCODE_CHILD_SYSTEM, "permissions": rules}}}
+
+    def run_env(self, run):
+        return {"OPENCODE_CONFIG_CONTENT": json.dumps(self.child_config(run), ensure_ascii=False)}
+
+    def command(self, run):
+        # 子だけの設定（エージェントと権限）を効かせるため、自分のサーバーで動かす（--standalone）。
+        # 設定は OPENCODE_CONFIG_CONTENT（run_env）で渡す。指示文は標準入力から読ませる
+        cmd = self.argv + ["run", "--standalone", "--format", "json", "--agent", OPENCODE_CHILD_AGENT]
+        if run.model:
+            cmd += ["--model", run.model]
+        cmd += {"new": [], "fork": ["--session", run.session_id, "--fork"],
+                "resume": ["--session", run.session_id]}[run.mode]
+        return cmd
+
+    def new_session_id(self):
+        return None  # opencode run が作る（イベントの sessionID で受け取る）
+
+    def reader(self):
+        return OpenCodeReader()
+
+
+AGENTS = {"claude": ClaudeAgent, "codex": CodexAgent, "opencode": OpenCodeAgent}
 
 
 def detect_session_agent(env):

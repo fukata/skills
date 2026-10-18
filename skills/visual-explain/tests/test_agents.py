@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""agents.py（Claude Code と Codex の違いを吸収するアダプタ）のテスト。
+"""agents.py（Claude Code・Codex・OpenCode の違いを吸収するアダプタ）のテスト。
   usage: python3 -I skills/visual-explain/tests/test_agents.py
 """
+import contextlib
 import importlib.util
 import json
 import os
@@ -33,6 +34,23 @@ def run(**kw):
                 write_dirs=["/out/topic/images"], check_argvs=[["python3", "-I", "/s/check.py", "/out/topic/x.html"]])
     base.update(kw)
     return agents.Run(**base)
+
+
+@contextlib.contextmanager
+def data_home():
+    """OpenCode の会話の記録（XDG_DATA_HOME/opencode）を一時フォルダに向ける。"""
+    home = tempfile.mkdtemp()
+    os.makedirs(os.path.join(home, "opencode"), exist_ok=True)
+    before = os.environ.get("XDG_DATA_HOME")
+    os.environ["XDG_DATA_HOME"] = home
+    try:
+        yield home
+    finally:
+        if before is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = before
+        shutil.rmtree(home, ignore_errors=True)
 
 
 class ClaudeAgentTest(unittest.TestCase):
@@ -237,10 +255,118 @@ class CodexAgentTest(unittest.TestCase):
         self.assertEqual(env, {"CODEX_HOME": "/b", "PATH": "/bin"})
 
 
+class OpenCodeAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.a = agents.OpenCodeAgent(["opencode"])
+
+    def test_fork_resume_new_read_the_prompt_from_stdin(self):
+        self.assertEqual(self.a.command(run()), ["opencode", "run", "--standalone", "--format", "json",
+                                                 "--agent", agents.OPENCODE_CHILD_AGENT])
+        self.assertEqual(self.a.command(run(mode="fork"))[-3:], ["--session", run().session_id, "--fork"])
+        self.assertEqual(self.a.command(run(mode="resume", session_id="ses_2"))[-2:], ["--session", "ses_2"])
+        model = self.a.command(run(model="x/y"))
+        self.assertEqual(model[model.index("--model") + 1], "x/y")
+        # 新しい会話の ID は opencode が振る（出力のイベントから受け取る）
+        self.assertIsNone(self.a.new_session_id())
+
+    def test_child_config_denies_all_then_allows_the_material(self):
+        rules = self.a.child_config(run())["agents"][agents.OPENCODE_CHILD_AGENT]["permissions"]
+        self.assertEqual(rules[0], {"action": "*", "resource": "*", "effect": "deny"})
+        for rule in [{"action": "read", "resource": "*", "effect": "allow"},
+                     {"action": "glob", "resource": "*", "effect": "allow"},
+                     {"action": "grep", "resource": "*", "effect": "allow"},
+                     {"action": "external_directory", "resource": "*", "effect": "allow"},
+                     {"action": "edit", "resource": "/out/topic/explanation.qa-draft.html", "effect": "allow"},
+                     {"action": "edit", "resource": "/out/topic/qa/answers/q1.html", "effect": "allow"},
+                     {"action": "edit", "resource": "/out/topic/images/*", "effect": "allow"},
+                     {"action": "shell", "resource": "python3 -I /s/check.py*", "effect": "allow"},
+                     {"action": "webfetch", "resource": "*", "effect": "allow"},
+                     {"action": "websearch", "resource": "*", "effect": "allow"}]:
+            self.assertIn(rule, rules)
+        # 質問のツールは許さない（子の中から受け箱を開かない）
+        self.assertNotIn("question", [r["action"] for r in rules])
+        local = self.a.child_config(run(local_only=True))["agents"][agents.OPENCODE_CHILD_AGENT]["permissions"]
+        self.assertEqual([r["action"] for r in local if r["action"] in ("websearch", "webfetch")], [])
+
+    def test_path_rules_allow_the_relative_and_absolute_forms(self):
+        rules = self.a.path_rules(["/out/topic/x.html"], "/out")
+        self.assertEqual({r["resource"] for r in rules}, {"/out/topic/x.html", "topic/x.html"})
+        # 作業ディレクトリの外は絶対の形だけ（子の cwd から相対で書けない）
+        self.assertEqual({r["resource"] for r in self.a.path_rules(["/other/x.html"], "/out")}, {"/other/x.html"})
+
+    def test_shell_rules_only_allow_the_check(self):
+        rules = self.a.shell_rules([["python3", "-I", "/s/check.py", "/out/topic/x.html"]])
+        self.assertEqual([(r["action"], r["resource"]) for r in rules], [("shell", "python3 -I /s/check.py*")])
+        self.assertEqual(self.a.shell_rules([[]]), [])
+
+    def test_run_env_carries_the_child_config(self):
+        cfg = json.loads(self.a.run_env(run())["OPENCODE_CONFIG_CONTENT"])
+        self.assertIn(agents.OPENCODE_CHILD_AGENT, cfg["agents"])
+
+    def test_reader_maps_tool_events_to_steps(self):
+        r = self.a.reader()
+        lines = [{"type": "tool_use", "sessionID": "ses_1", "part": {"id": "call_1", "tool": "read",
+                  "state": {"status": "completed", "input": {"path": "/x"}}}},
+                 # 同じ呼び出しは 2 度出しても 1 回だけ
+                 {"type": "tool_use", "sessionID": "ses_1", "part": {"id": "call_1", "tool": "read",
+                  "state": {"status": "completed", "input": {"path": "/x"}}}},
+                 {"type": "tool_use", "sessionID": "ses_1", "part": {"id": "call_2", "tool": "shell",
+                  "state": {"status": "completed", "input": {"command": "cat x"}}}},
+                 {"type": "tool_use", "sessionID": "ses_1", "part": {"id": "call_3", "tool": "no_such_tool",
+                  "state": {"status": "completed", "input": {}}}},
+                 {"type": "text", "sessionID": "ses_1", "part": {"text": "途中"}},
+                 {"type": "text", "sessionID": "ses_1", "part": {"text": "最後"}}]
+        steps = [st for line in lines for st in r.feed(json.dumps(line))]
+        self.assertEqual(steps, [("Read", {"path": "/x"}), ("Bash", {"command": "cat x"})])
+        self.assertEqual(r.result(0, "", ""), (True, "最後", "ses_1", None))
+
+    def test_reader_failures(self):
+        r = self.a.reader()
+        r.feed(json.dumps({"type": "error", "sessionID": "ses_1",
+                           "error": {"type": "provider.no-route", "message": "Model unavailable: x"}}))
+        ok, _, _, error = r.result(0, "", "")
+        self.assertFalse(ok)
+        self.assertIn("Model unavailable: x", error)
+        self.assertFalse(self.a.reader().result(0, "", "")[0])  # 応答の文が無い
+        self.assertIn("boom", self.a.reader().result(1, "boom", "")[3])
+
+    def test_sessions_and_first_prompt_from_sqlite(self):
+        with data_home() as home:
+            db = sqlite3.connect(os.path.join(home, "opencode", "opencode.db"))
+            db.execute("create table session_v2 (id text, title text, directory text)")
+            db.execute("create table session_message (session_id text, type text, seq integer, data text)")
+            db.execute("insert into session_v2 values ('ses_abc', '題名', '/repo')")
+            db.execute("insert into session_message values ('ses_abc', 'user', 1, ?)",
+                       (json.dumps({"text": "一覧を\n直して"}),))
+            db.commit()
+            db.close()
+            self.assertTrue(self.a.session_exists("ses_abc", home))
+            self.assertFalse(self.a.session_exists("ses_nope", home))
+            self.assertFalse(self.a.session_exists("../x", home))
+            self.assertEqual(self.a.session_info("ses_abc", home), {"prompt": "一覧を 直して"})
+            self.assertEqual(self.a.session_info("ses_nope", home), {"prompt": None})
+
+    def test_without_a_database_a_session_can_be_forked_anyway(self):
+        with data_home() as home:
+            # 会話の記録が無い（別のデータフォルダ等）ときは、分岐を試す
+            self.assertTrue(self.a.session_exists("ses_x", home))
+            self.assertEqual(self.a.session_info("ses_x", home), {"prompt": None})
+
+    def test_child_env_drops_the_parent_session(self):
+        env = self.a.child_env({"OPENCODE": "1", "OPENCODE_SESSION_ID": "ses_1", "AI_AGENT": "opencode",
+                                "OPENCODE_CONFIG_DIR": "/a", "PATH": "/bin"}, "/b")
+        self.assertEqual(env, {"OPENCODE_CONFIG_DIR": "/b", "PATH": "/bin"})
+
+    def test_no_mcp_servers_for_the_child(self):
+        self.assertEqual(self.a.list_mcp("/", dict(os.environ)), [])
+        self.assertEqual(self.a.external_label([]), "Web の検索（websearch）と取得（webfetch）")
+
+
 class DetectTest(unittest.TestCase):
     def test_detects_the_running_agent(self):
         self.assertEqual(agents.detect_session_agent({"CLAUDE_CODE_SESSION_ID": "c1"}), ("claude", "c1"))
         self.assertEqual(agents.detect_session_agent({"CODEX_THREAD_ID": "x1"}), ("codex", "x1"))
+        self.assertEqual(agents.detect_session_agent({"OPENCODE_SESSION_ID": "ses_1"}), ("opencode", "ses_1"))
         self.assertEqual(agents.detect_session_agent({}), (None, None))
 
 

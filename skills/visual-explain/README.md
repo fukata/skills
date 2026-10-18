@@ -1,28 +1,29 @@
 # visual-explain
 
-仕様・変更内容・仕組み・調整案を、図とスクリーンショットを中心にした HTML 資料にまとめて配信するスキル。Claude Code と Codex CLI で使えます。
+仕様・変更内容・仕組み・調整案を、図とスクリーンショットを中心にした HTML 資料にまとめて配信するスキル。Claude Code・Codex CLI・OpenCode（opencode）で使えます。
 
 - 資料は、事前知識の無い人が読む前提で書き、文章だけでは掴みにくい内容（流れ・日程・分岐・前後の違い）を図にします。
 - 質問への回答でも、複数の事象の関係を問う質問や長くなる回答には、文章の回答に資料を添えます。
 - 配信したページからは追加の質問ができ、配信しているマシンのエージェントが答えます。説明不足なら本文も直します。
-- エージェントの質問（Claude Code の AskUserQuestion、Codex の request_user_input）にも、資料のページで答えられます。
+- エージェントの質問（Claude Code の AskUserQuestion、Codex の request_user_input、OpenCode の question）にも、資料のページで答えられます。
 - 説明動画を頼むと、図やスクショに要点のテロップ・全文字幕を添えた MP4 と再生ページを作ります。日本語の音声解説も付けられます。
 
 ## 導入
 
 ```bash
-npx skills add fukata/skills -g -a claude-code -a codex -s visual-explain
+npx skills add fukata/skills -g -a claude-code -a codex -a opencode -s visual-explain
 bash ~/.agents/skills/visual-explain/setup.sh
 ```
 
-- `setup.sh` は、Claude Code の `~/.claude/settings.json` と Codex の `~/.codex/hooks.json` に hook を登録します（設定フォルダがあるものだけ。`--claude` / `--codex` で絞れます）。hook は、セッションの開始時に受け箱の配信サーバーを起動し、エージェントの質問をページに出します。
+- `setup.sh` は、Claude Code の `~/.claude/settings.json` と Codex の `~/.codex/hooks.json` に hook を、OpenCode の設定フォルダ（`~/.config/opencode/`）の `plugins/` に受け箱の plugin を登録します（設定フォルダや `opencode` コマンドがあるものを対象にします。`--claude` / `--codex` / `--opencode` で絞れます）。hook は、セッションの開始時に受け箱の配信サーバーを起動し、エージェントの質問をページに出します。
 - **Codex は、hook を信頼するまで動かしません。** `setup.sh` の後に Codex を開き、`/hooks` で visual-explain の 2 つの hook を信頼してください。
+- **OpenCode は、起動し直すと効きます。** 登録は `~/.config/opencode/plugins/visual-explain.js`（スキルの中の `opencode/plugin.js` を読み込む 1 行）を置くだけです。OpenCode を起動し直すと、`question` ツールの質問に資料のページで答えられるようになります。スキルを更新しても置き直しは要りません。
 - plugin 版の visual-explain を入れている場合は、先に外してください（`/plugin uninstall visual-explain@<marketplace>`）。両方あると hook が二重に動き、受け箱の配信サーバーがポートを取り合います。`setup.sh` は plugin 版が有効なら止まります。
 
 外すとき:
 
 ```bash
-bash ~/.agents/skills/visual-explain/teardown.sh
+bash ~/.agents/skills/visual-explain/teardown.sh   # OpenCode は起動し直すと効きます
 python3 ~/.agents/skills/visual-explain/scripts/serve.py ask-config --stop   # 受け箱の配信サーバーも止める
 npx skills remove -g visual-explain
 ```
@@ -87,7 +88,7 @@ VOICEVOX のエディターかエンジンが起動していれば、`--speech v
 
 配信したページの右下の「質問する」から、資料を開いたまま質問できます。
 
-- 回答は、資料を作ったエージェントが、資料を作ったセッションを分岐して書きます（Claude Code は `claude -p --resume <ID> --fork-session`、Codex は `codex exec fork <ID>`）。配信しているマシンでログインしているアカウントの使用量を使います。2 問目以降は 1 問目のセッションの続きです。
+- 回答は、資料を作ったエージェントが、資料を作ったセッションを分岐して書きます（Claude Code は `claude -p --resume <ID> --fork-session`、Codex は `codex exec fork <ID>`、OpenCode は `opencode run --session <ID> --fork`）。配信しているマシンでログインしているアカウントの使用量を使います。2 問目以降は 1 問目のセッションの続きです。
 - 説明が足りなければ作業用コピーを直し、検査を通ったら本文と差し替えます。ページは最新版に切り替わり、直した節が目立ちます。直す前の版は `qa/history/` に残ります。
 - 回答には、回答の下の「この回答に質問する」か、回答の中の文字を選んで、続けて質問できます。続きの質問は元の質問のすぐ下に並びます。
 - 回答を待つ間は途中経過が出て、取り消せます。質問欄は幅を変えたり、別ウィンドウに切り出したりできます。「回答を資料に書き出す」で、質問と回答を資料の末尾の節に残せます。
@@ -96,6 +97,7 @@ VOICEVOX のエディターかエンジンが起動していれば、`--speech v
 - エージェントにできること:
   - Claude Code: 読み取り・Web・MCP・作業用コピーと回答と `images/` への書き込み・検査スクリプトだけをツール単位で許します。
   - Codex: 子の codex にだけ付けるガードの hook（`scripts/codex_guard.py`）で、すべてのツールを許可リストで絞ります（読み取りのコマンド・検査・作業用コピーと回答と `images/` への書き込み・MCP）。サンドボックスが動けば、その上で読み取り専用＋資料フォルダだけ書き込める設定で動かします（AppArmor が bwrap を止める Ubuntu 24.04 系などでは、ガードだけになります）。ガードはシェルの文字列で判定するので、Claude Code より弱い仕組みです。
+  - OpenCode: 子の opencode を `--standalone` で動かし、`OPENCODE_CONFIG_CONTENT` の子エージェント（`visual-explain-child`）と権限で、既定を全部拒否にして資料の作業用コピーと回答と `images/` への書き込み・検査だけを許します。親の設定（MCP サーバー・plugin など）は読み込ませません。
 - 質問には、配信の出力に出る `?k=<合言葉>` 付きの URL で一度開く必要があります。配信者本人だけが使ってください。
 
 詳しくは [references/qa.md](references/qa.md)。
@@ -108,13 +110,13 @@ VOICEVOX のエディターかエンジンが起動していれば、`--speech v
 python3 ~/.agents/skills/visual-explain/scripts/serve.py ask-config
 ```
 
-| 項目 | Claude Code | Codex |
-| --- | --- | --- |
-| 対象の質問 | AskUserQuestion | request_user_input（既定では Plan モードでだけ使われる） |
-| 複数選択・プレビュー | ある | 無い |
-| 答えの返り方 | AskUserQuestion の答えとメモ | hook がツールを拒否し、その理由の文に答えを入れて返す |
-| hook の信頼 | 要らない | `/hooks` で信頼する |
-| セッションの開始時 | 受け箱の URL をターミナルに出す | 何も出さない（モデルの文脈に入るため） |
+| 項目 | Claude Code | Codex | OpenCode |
+| --- | --- | --- | --- |
+| 対象の質問 | AskUserQuestion | request_user_input（既定では Plan モードでだけ使われる） | question |
+| 複数選択・プレビュー | ある | 無い | 複数選択は `multiple` である。プレビューは無い |
+| 答えの返り方 | AskUserQuestion の答えとメモ | hook がツールを拒否し、その理由の文に答えを入れて返す | plugin が `question` の実行を差し替え、`answers`（質問ごとの配列）をツールの結果にして返す |
+| 登録 | settings.json の hook | hooks.json の hook（`/hooks` で信頼する） | 設定フォルダの `plugins/visual-explain.js`（OpenCode の起動し直しが要る） |
+| セッションの開始時 | 受け箱の URL をターミナルに出す | 何も出さない（モデルの文脈に入るため） | 何も出さない（hook が無いため。受け箱の URL は `ask-config` で見る） |
 
 質問ごとに、質問したセッションを分岐したエージェントが、選ぶための図入りの資料を作ります（数分。`ask-config --build never` で作らない）。資料には、選択肢の比較の前に、なぜその質問が出たか（何の作業の途中か・聞く理由・決まっていること・判断の軸・答えた後）を書きます。複数のセッション・アカウント・エージェントから質問が来ても、答えはそれぞれのセッションに戻ります。設定とデータは `~/.local/state/visual-explain/` に置きます。
 
@@ -172,7 +174,7 @@ visual-explain-<topic>/
 bash skills/visual-explain/tests/run.sh
 ```
 
-python3 と git が必須です。claude と codex は代役（`tests/fixtures/fake_claude.py`・`fake_codex.py`）を使います。ヘッドレス Chrome があれば、ブラウザでの検査とページの表示も確かめます。FFmpeg・ffprobe もあれば実際に短い動画を出力し、音声・字幕・場面の同期を検査します。読み上げには代役を使い、外部サービスには接続しません。ブラウザを使うテストは図の文字幅を測るので、日本語フォントが入っていないと失敗します。
+python3 と git が必須です。claude・codex・opencode は代役（`tests/fixtures/fake_claude.py`・`fake_codex.py`・`fake_opencode.py`）を使います。受け箱の登録（`tests/setup.test.sh`）は一時的な HOME で行い、OpenCode の設定フォルダは `OPENCODE_CONFIG_DIR` を一時フォルダに向けます。ヘッドレス Chrome があれば、ブラウザでの検査とページの表示も確かめます。FFmpeg・ffprobe もあれば実際に短い動画を出力し、音声・字幕・場面の同期を検査します。読み上げには代役を使い、外部サービスには接続しません。ブラウザを使うテストは図の文字幅を測るので、日本語フォントが入っていないと失敗します。
 
 ## ライセンス
 

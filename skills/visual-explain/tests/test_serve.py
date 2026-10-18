@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(HERE, "..", "scripts")
 FAKE = os.path.join(HERE, "fixtures", "fake_claude.py")
 FAKE_CODEX = os.path.join(HERE, "fixtures", "fake_codex.py")
+FAKE_OPENCODE = os.path.join(HERE, "fixtures", "fake_opencode.py")
 DOC = "topic/explanation.html"
 TOKEN = "t0ken-for-test"
 
@@ -49,6 +51,11 @@ class ServeTestBase(unittest.TestCase):
         shutil.copytree(os.path.join(HERE, "fixtures", "repo"), self.repo)
         self.claude_home = os.path.join(self.tmp, "claude-home")
         self.codex_home = os.path.join(self.tmp, "codex-home")
+        self.opencode_home = os.path.join(self.tmp, "opencode-home")
+        # OpenCode の会話の記録（XDG_DATA_HOME/opencode の SQLite）を一時フォルダに向ける
+        self.data_home = os.path.join(self.tmp, "data")
+        self.before_data_home = os.environ.get("XDG_DATA_HOME")
+        os.environ["XDG_DATA_HOME"] = self.data_home
         self.log = os.path.join(self.tmp, "fake.jsonl")
         os.environ["FAKE_CLAUDE_LOG"] = self.log
         self.mcp_log = os.path.join(self.tmp, "mcp.log")
@@ -63,12 +70,17 @@ class ServeTestBase(unittest.TestCase):
             self.app.stop()
         os.environ.pop("FAKE_CLAUDE_LOG", None)
         os.environ.pop("FAKE_MCP_LOG", None)
+        if self.before_data_home is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = self.before_data_home
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def start(self, **kw):
         opts = dict(root=self.root, bind="127.0.0.1", port=0, repo=self.repo,
                     claude=[sys.executable, FAKE], codex=[sys.executable, FAKE_CODEX], token=TOKEN, browser_check=False,
-                    answer_timeout=10, claude_home=self.claude_home, codex_home=self.codex_home)
+                    answer_timeout=10, claude_home=self.claude_home, codex_home=self.codex_home,
+                    opencode_home=self.opencode_home)
         opts.update(kw)
         self.app = serve.App(serve.Config(**opts))
         self.httpd = serve.make_server(self.app)
@@ -521,6 +533,7 @@ class AnswerTest(ServeTestBase):
         self.assertTrue(self.app.wait_idle(5))
         self.app.agents["claude"].argv = [os.path.join(self.tmp, "no-such-claude")]
         self.app.agents["codex"].argv = [os.path.join(self.tmp, "no-such-codex")]
+        self.app.agents["opencode"].argv = [os.path.join(self.tmp, "no-such-opencode")]
         other = os.path.join(self.tmp, "other")
         os.makedirs(other)
         self.assertEqual(self.app.mcp_servers(other), [])
@@ -876,7 +889,8 @@ class LifecycleTest(ServeTestBase):
         self.assertTrue(self.state()["qa"]["enabled"])
 
     def test_disabled_without_claude(self):
-        self.start(claude=[os.path.join(self.tmp, "no-such-claude")], codex=[os.path.join(self.tmp, "no-such-codex")])
+        self.start(claude=[os.path.join(self.tmp, "no-such-claude")], codex=[os.path.join(self.tmp, "no-such-codex")],
+                   opencode=[os.path.join(self.tmp, "no-such-opencode")])
         st = self.state()
         self.assertFalse(st["qa"]["enabled"])
         self.assertTrue(st["qa"]["reason"])
@@ -885,7 +899,8 @@ class LifecycleTest(ServeTestBase):
 
     def test_origin_command(self):
         script = os.path.join(SCRIPTS, "serve.py")
-        env = {k: v for k, v in os.environ.items() if k not in ("CODEX_THREAD_ID", "CLAUDE_CONFIG_DIR")}
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CODEX_THREAD_ID", "CLAUDE_CONFIG_DIR", "OPENCODE_SESSION_ID")}
         env["CLAUDE_CODE_SESSION_ID"] = "sid-123"
         subprocess.run([sys.executable, "-I", script, "origin", self.material, "--cwd", self.repo],
                        env=env, check=True, capture_output=True)
@@ -1042,6 +1057,165 @@ class CodexAnswerTest(ServeTestBase):
         self.assertEqual(out.returncode, 0, out.stderr)
         origin = json.loads(self.read("qa", "origin.json"))
         self.assertEqual((origin["agent"], origin["session_id"], origin["config_dir"]), ("codex", "thread-1", None))
+
+
+class OpenCodeAnswerTest(ServeTestBase):
+    """ページの質問に OpenCode（opencode run。代役は fake_opencode.py）で答える。"""
+
+    def setUp(self):
+        super().setUp()
+        self.data_home = os.path.join(self.tmp, "opencode-data")
+        self.before_data_home = os.environ.get("XDG_DATA_HOME")
+        os.environ["XDG_DATA_HOME"] = self.data_home
+
+    def tearDown(self):
+        if self.before_data_home is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = self.before_data_home
+        super().tearDown()
+
+    def start(self, **kw):
+        kw.setdefault("opencode", [sys.executable, FAKE_OPENCODE])
+        return super().start(**kw)
+
+    def opencode_db(self):
+        """会話の記録（SQLite）を開く。"""
+        os.makedirs(os.path.join(self.data_home, "opencode"), exist_ok=True)
+        return sqlite3.connect(os.path.join(self.data_home, "opencode", "opencode.db"))
+
+    def opencode_session(self, sid, prompt=None):
+        """会話の記録（SQLite）を 1 つ作る。"""
+        db = self.opencode_db()
+        db.execute("create table if not exists session_v2 (id text, title text, directory text)")
+        db.execute("create table if not exists session_message (session_id text, type text, seq integer, data text)")
+        db.execute("insert into session_v2 values (?, '題名', ?)", (sid, self.repo))
+        if prompt is not None:
+            db.execute("insert into session_message values (?, 'user', 1, ?)", (sid, json.dumps({"text": prompt})))
+        db.commit()
+        db.close()
+
+    def origin(self, sid, agent="opencode", **extra):
+        os.makedirs(os.path.join(self.material, "qa"), exist_ok=True)
+        with open(os.path.join(self.material, "qa", "origin.json"), "w") as f:
+            json.dump(dict({"session_id": sid, "cwd": self.repo, "agent": agent}, **extra), f)
+
+    def opencode_calls(self):
+        return [c for c in self.calls() if c.get("agent") == "opencode"]
+
+    def ask_opencode(self, question, **extra):
+        before = len(self.opencode_calls())
+        item = self.ask(question, **extra)
+        self.assertGreater(len(self.opencode_calls()), before, "opencode が動いていない")
+        return item
+
+    def test_forks_the_session_then_resumes_it(self):
+        self.opencode_session("ses_origin")
+        self.origin("ses_origin")
+        self.start()
+        first = self.ask_opencode("一つ目")
+        self.assertEqual((first["status"], first["session"]), ("answered", "fork"), first)
+        self.assertEqual(first["answer_html"], "<p>回答: 一つ目</p>")
+        c1 = self.opencode_calls()[-1]
+        self.assertEqual(c1["argv"][-3:], ["--session", "ses_origin", "--fork"])
+        self.assertEqual(c1["child"], "1")
+        self.assertIn("回答の書き出し先", c1["prompt"])
+        forked = json.loads(self.read("qa", "session.json"))
+        self.assertEqual(forked["agent"], "opencode")
+        self.assertEqual(forked["forked_from"], "ses_origin")
+        second = self.ask_opencode("二つ目")
+        self.assertEqual((second["status"], second["session"]), ("answered", "resume"), second)
+        c2 = self.opencode_calls()[-1]
+        self.assertEqual(c2["argv"][-2:], ["--session", forked["session_id"]])
+        self.assertNotIn("--fork", c2["argv"])
+
+    def test_failed_fork_retries_with_a_new_session(self):
+        self.opencode_session("too-long-origin")
+        self.origin("too-long-origin")
+        self.start()
+        item = self.ask_opencode("やり直す")
+        self.assertEqual((item["status"], item["session"]), ("answered", "new"), item)
+        self.assertNotIn("--session", self.opencode_calls()[-1]["argv"])
+
+    def test_progress_and_failure_are_reported(self):
+        self.opencode_session("ses_origin")
+        self.origin("ses_origin")
+        self.start()
+        steps = [st["text"] for st in self.ask_opencode("途中経過")["progress"]]
+        self.assertIn("資料を読んでいます", steps)
+        self.assertIn("Web で検索しています: visual explain", steps)
+        self.assertIn("回答を書いています", steps)
+        self.assertTrue(any(s.startswith("コードを検索しています: GRACE_DAYS") for s in steps), steps)
+        fail = self.ask("FAIL して")
+        self.assertEqual(fail["status"], "failed", fail)
+        self.assertIn("opencode が失敗した", fail["error"])
+
+    def test_sends_the_child_config_and_permissions(self):
+        self.opencode_session("ses_origin")
+        self.origin("ses_origin")
+        self.start()
+        self.ask_opencode("設定")
+        call = self.opencode_calls()[-1]
+        self.assertEqual(call["argv"][:5], ["run", "--standalone", "--format", "json", "--agent"])
+        cfg = json.loads(call["config"])
+        self.assertIn("visual-explain-child", cfg["agents"])
+        rules = cfg["agents"]["visual-explain-child"]["permissions"]
+        self.assertEqual(rules[0], {"action": "*", "resource": "*", "effect": "deny"})
+        self.assertIn({"action": "read", "resource": "*", "effect": "allow"}, rules)
+        self.assertIn({"action": "webfetch", "resource": "*", "effect": "allow"}, rules)
+        # 子が許されているのは、作業用コピー・回答・画像・検査だけ
+        self.assertIn({"action": "edit", "resource": os.path.join(self.material, "explanation.qa-draft.html"),
+                       "effect": "allow"}, rules)
+        check = os.path.join(SCRIPTS, "check-explanation.py")
+        self.assertIn({"action": "shell", "resource": "python3 -I %s*" % os.path.realpath(check),
+                       "effect": "allow"}, rules)
+        self.assertNotIn("question", [r["action"] for r in rules])
+
+    def test_local_only_does_not_allow_web(self):
+        self.opencode_session("ses_origin")
+        self.origin("ses_origin")
+        self.start(local_only=True)
+        item = self.ask_opencode("外を見ないで")
+        self.assertEqual(item["status"], "answered", item)
+        cfg = json.loads(self.opencode_calls()[-1]["config"])
+        rules = cfg["agents"]["visual-explain-child"]["permissions"]
+        self.assertEqual([r for r in rules if r["action"] in ("webfetch", "websearch")], [])
+
+    def test_new_session_when_the_recorded_session_is_gone(self):
+        db = self.opencode_db()  # 会話の記録は在るが、記録した ID は無い
+        db.execute("create table if not exists session_v2 (id text, title text, directory text)")
+        db.commit()
+        db.close()
+        self.origin("ses_gone")
+        self.start()
+        item = self.ask_opencode("新しく")
+        self.assertEqual((item["status"], item["session"]), ("answered", "new"), item)
+        argv = self.opencode_calls()[-1]["argv"]
+        self.assertFalse([a for a in argv if "ses_" in a], argv)
+
+    def test_agent_option_picks_opencode_for_new_sessions(self):
+        self.start(agent="opencode")
+        item = self.ask_opencode("新しく")
+        self.assertEqual((item["status"], item["session"]), ("answered", "new"), item)
+        self.assertEqual(self.state()["qa"]["agent_name"], "OpenCode")
+
+    def test_falls_back_when_opencode_is_missing(self):
+        self.opencode_session("ses_origin")
+        self.origin("ses_origin")
+        self.start(opencode=[os.path.join(self.tmp, "no-opencode")])
+        item = self.ask("opencode が無い")
+        self.assertEqual(item["status"], "answered", item)
+        self.assertEqual(self.opencode_calls(), [])
+
+    def test_origin_command_records_the_opencode_session(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "OPENCODE_CONFIG_DIR")}
+        env["OPENCODE_SESSION_ID"] = "ses_origin"
+        out = subprocess.run([sys.executable, "-I", os.path.join(SCRIPTS, "serve.py"), "origin", self.material,
+                              "--cwd", self.repo], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        origin = json.loads(self.read("qa", "origin.json"))
+        self.assertEqual((origin["agent"], origin["session_id"]), ("opencode", "ses_origin"))
 
 
 class PdfTest(ServeTestBase):
@@ -1262,6 +1436,14 @@ CODEX_QUESTIONS = [
     {"id": "plan", "header": "案", "question": "どちらの案にしますか？",
      "options": [{"label": "案A", "description": "一覧で直す"}, {"label": "案B", "description": "詳細で直す"}]},
     {"id": "where", "header": "場所", "question": "直す所は？",
+     "options": [{"label": "フック", "description": ""}, {"label": "配信", "description": ""}]},
+]
+
+# OpenCode の question ツールの質問（plugin が ask_hook.py --agent opencode に渡す形。id が無く multiple がある）
+OPENCODE_QUESTIONS = [
+    {"header": "案", "question": "どちらの案にしますか？",
+     "options": [{"label": "案A", "description": "一覧で直す"}, {"label": "案B", "description": "詳細で直す"}]},
+    {"header": "範囲", "question": "直す所は？", "multiple": True,
      "options": [{"label": "フック", "description": ""}, {"label": "配信", "description": ""}]},
 ]
 
@@ -1794,7 +1976,7 @@ class AskHookTest(ServeTestBase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("/__qa/inbox?k=", out.stdout)
         self.assertIn("動いている", out.stdout)
-        self.assertIn("エージェントの質問（AskUserQuestion・request_user_input）を資料のページで答える", out.stdout)
+        self.assertIn("エージェントの質問（AskUserQuestion・request_user_input・question）を資料のページで答える", out.stdout)
         conf = serve.load_ask_config(self.home)
         self.assertEqual(os.stat(os.path.join(self.home, "ask.json")).st_mode & 0o777, 0o600)
         self.assertEqual((conf["port"], conf["wait"], conf["build"]), (port, 120, "never"))
@@ -1807,9 +1989,102 @@ class AskHookTest(ServeTestBase):
         self.assertIn("--private", open(os.path.join(SCRIPTS, "serve.py"), encoding="utf-8").read())
 
 
+class OpenCodeHookTest(ServeTestBase):
+    """ask_hook.py --agent opencode（OpenCode の plugin が question ツールの実行を差し替えて呼ぶ入り口）。"""
+    HOOK = os.path.join(SCRIPTS, "ask_hook.py")
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "ask-home")
+        os.environ["VISUAL_EXPLAIN_ASK_HOME"] = self.home
+
+    def tearDown(self):
+        os.environ.pop("VISUAL_EXPLAIN_ASK_HOME", None)
+        super().tearDown()
+
+    def configure(self, **conf):
+        base = {"mode": "always", "bind": "127.0.0.1", "port": self.port, "token": TOKEN, "root": self.root,
+                "wait": 30, "build": "never"}
+        base.update(conf)
+        serve.save_ask_config(self.home, base)
+
+    def hook(self, payload=None, env=None):
+        e = dict(os.environ)
+        e.update(env or {})
+        proc = subprocess.Popen([sys.executable, "-I", self.HOOK, "--agent", "opencode"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=e)
+        payload = payload if payload is not None else {"session_id": "ses_ask", "cwd": self.repo,
+                                                       "questions": OPENCODE_QUESTIONS}
+        proc.stdin.write(json.dumps(payload))
+        proc.stdin.close()
+        proc.stdin = None
+        return proc
+
+    def registered(self, timeout=10):
+        end = time.time() + timeout
+        while time.time() < end:
+            asks = json.loads(self.req("GET", "/__qa/asks")[2])["asks"]
+            if asks:
+                return asks[0]["doc"]
+            time.sleep(0.1)
+        self.fail("フックが質問を登録しない")
+
+    def last_json(self, out):
+        return json.loads([ln for ln in out.strip().split("\n") if ln.strip()][-1])
+
+    def test_returns_the_page_answer_as_the_question_result(self):
+        self.start()
+        self.configure()
+        proc = self.hook()
+        doc = self.registered()
+        st = json.loads(self.req("GET", "/__qa/state?doc=" + doc)[2])
+        self.assertEqual(st["ask"]["agent_name"], "OpenCode")
+        self.assertEqual([q["multiSelect"] for q in st["ask"]["questions"]], [False, True])
+        status, _, data = self.req("POST", "/__qa/answer", {"doc": doc, "answers": {
+            "どちらの案にしますか？": {"selected": [], "other": "案A"},
+            "直す所は？": {"selected": ["配信", "フック"], "notes": "急ぎ"}}})
+        self.assertEqual(status, 200, data)
+        out, err = proc.communicate(timeout=15)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(self.last_json(out), {"answers": [["案A"], ["フック", "配信", "user_note: 急ぎ"]]})
+        self.assertNotIn("fallback", out)  # 答えが返ったら、ターミナルには任せない
+
+    def test_terminal_choice_falls_back(self):
+        self.start()
+        self.configure()
+        proc = self.hook()
+        doc = self.registered()
+        self.req("POST", "/__qa/ask-close", {"doc": doc, "reason": "terminal"})
+        out, err = proc.communicate(timeout=15)
+        self.assertEqual((proc.returncode, self.last_json(out)), (0, {"fallback": True}), err)
+
+    def test_falls_back_when_disabled(self):
+        self.start()
+        self.configure(mode="off")
+        proc = self.hook()
+        out, err = proc.communicate(timeout=10)
+        self.assertEqual((proc.returncode, self.last_json(out)), (0, {"fallback": True}), err)
+        self.assertEqual(json.loads(self.req("GET", "/__qa/asks")[2])["asks"], [])
+
+    def test_falls_back_inside_the_servers_own_child(self):
+        self.start()
+        self.configure()
+        proc = self.hook(env={"VISUAL_EXPLAIN_ASK_CHILD": "1"})
+        out, err = proc.communicate(timeout=10)
+        self.assertEqual((proc.returncode, self.last_json(out)), (0, {"fallback": True}), err)
+        self.assertEqual(json.loads(self.req("GET", "/__qa/asks")[2])["asks"], [])
+
+    def test_falls_back_for_a_question_that_cannot_be_shown(self):
+        self.start()
+        self.configure()
+        proc = self.hook({"session_id": "ses_ask", "cwd": self.repo, "questions": "なにか"})
+        out, err = proc.communicate(timeout=10)
+        self.assertEqual((proc.returncode, self.last_json(out)), (0, {"fallback": True}), err)
+        self.assertEqual(json.loads(self.req("GET", "/__qa/asks")[2])["asks"], [])
+
+
 class AskDefaultsTest(ServeTestBase):
     """既定の使い方（受け箱を開いているときだけページに出す）と、待ち受けるアドレスの既定。"""
-
     def setUp(self):
         super().setUp()
         self.home = os.path.join(self.tmp, "ask-home")

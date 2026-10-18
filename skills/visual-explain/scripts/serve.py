@@ -59,7 +59,7 @@ SKILL_MD = os.path.join(SKILL_DIR, "SKILL.md")
 TEMPLATE = os.path.join(SKILL_DIR, "assets", "explanation.html")
 BUILD_PROMPT = os.path.join(SKILL_DIR, "assets", "ask", "build-prompt.md")
 SERVE_PY = os.path.abspath(__file__)
-VERSION = "1.3.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
+VERSION = "1.4.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
 ASK_CHILD_ENV = "VISUAL_EXPLAIN_ASK_CHILD"  # 配信サーバーが動かす claude -p の印。フックはこの中の質問を扱わない
 
 QA_DIR = "qa"                 # 資料フォルダの中で質問と回答を置くフォルダ。静的配信では返さない
@@ -73,7 +73,8 @@ CHECK_TIMEOUT = 600
 KILL_GRACE = 10               # 時間切れで SIGTERM を送ってから SIGKILL までの猶予（秒）
 ALL_INTERFACES = {"", "0.0.0.0", "::", "[::]"}
 # 親のエージェントのセッションから引き継がない環境変数（入れ子のセッションと誤認させない）
-PARENT_ENV = agents_mod.ClaudeAgent.parent_env + agents_mod.CodexAgent.parent_env
+PARENT_ENV = (agents_mod.ClaudeAgent.parent_env + agents_mod.CodexAgent.parent_env
+              + agents_mod.OpenCodeAgent.parent_env)
 MCP_LIST_TIMEOUT = agents_mod.MCP_LIST_TIMEOUT
 # 質問を受け付ける資料の HTML に付ける。同じ配信元のスクリプト（qa.js・pdf.js）以外と、外部の資源を読み込ませない
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
@@ -460,7 +461,7 @@ def export_section(items, ids, stamp):
     """回答した質問を、資料の末尾に置く節（印で囲む）にする。ids は資料の id（節へのリンクを残すか決める）。
     stamp は書き出した時刻の文字（YYYY-MM-DD HH:MM）。"""
     out = [EXPORT_BEGIN, '<section id="%s" class="reader-qa">' % EXPORT_ID, "  <h2>%s</h2>" % EXPORT_TITLE,
-           '  <p class="note">資料を配信したページで読み手が質問し、資料を配信したマシンのエージェント（Claude Code・Codex）が答えた記録'
+           '  <p class="note">資料を配信したページで読み手が質問し、資料を配信したマシンのエージェント（Claude Code・Codex・OpenCode）が答えた記録'
            "（%d 件。%s に書き出し）。</p>" % (len(items), stamp)]
     exported = {str(i.get("id")) for i in items}
     for item in thread_order(items):
@@ -555,6 +556,7 @@ class Config:
     repo: str = None             # 説明したリポジトリ。検査の --repo と、新しいセッションの作業ディレクトリに使う
     claude: list = None          # claude を起動するコマンド（引数の配列）
     codex: list = None           # codex を起動するコマンド（引数の配列）
+    opencode: list = None        # opencode を起動するコマンド（引数の配列）
     agent: str = "auto"          # 資料を作ったセッションが分からないときに答えるエージェント（auto は使える方、両方なら claude）
     token: str = None
     doc_name: str = "explanation.html"
@@ -565,6 +567,7 @@ class Config:
     model: str = None
     claude_home: str = None      # 会話の記録を探す場所（既定は CLAUDE_CONFIG_DIR か ~/.claude）
     codex_home: str = None       # Codex の会話の記録を探す場所（既定は CODEX_HOME か ~/.codex）
+    opencode_home: str = None    # OpenCode の設定フォルダ（既定は OPENCODE_CONFIG_DIR か ~/.config/opencode）
     qa: bool = True
     allow_host: list = field(default_factory=list)  # IP アドレス・localhost・このマシンの名前・*.ts.net 以外に許すホスト名
     local_only: bool = False     # 回答で Web と MCP を使わず、資料とリポジトリだけで答える
@@ -582,6 +585,9 @@ class Config:
         self.claude_home = self.claude_home or os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
         self.codex = list(self.codex or ["codex"])
         self.codex_home = self.codex_home or os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+        self.opencode = list(self.opencode or ["opencode"])
+        self.opencode_home = (self.opencode_home or os.environ.get("OPENCODE_CONFIG_DIR")
+                              or os.path.expanduser("~/.config/opencode"))
         names = {"localhost", socket.gethostname(), socket.getfqdn(), self.bind.strip("[]")}
         names |= {n.split(".")[0] for n in list(names)} | set(self.allow_host or [])
         self.hosts = {n.lower().rstrip(".") for n in names if n}
@@ -1104,8 +1110,10 @@ class App:
         self.viewers = 0   # 受け箱か質問の資料をブラウザで開いている数（/__qa/events につないだままの接続）
         self.changes = 0   # AskUserQuestion の質問が増えた・締め切られた回数。受け箱に知らせる
         self.changed = threading.Condition()
-        self.agents = {"claude": agents_mod.ClaudeAgent(cfg.claude), "codex": agents_mod.CodexAgent(cfg.codex)}
-        self.homes = {"claude": cfg.claude_home, "codex": cfg.codex_home}  # 会話の記録を探す既定の場所
+        self.agents = {"claude": agents_mod.ClaudeAgent(cfg.claude), "codex": agents_mod.CodexAgent(cfg.codex),
+                       "opencode": agents_mod.OpenCodeAgent(cfg.opencode)}
+        self.homes = {"claude": cfg.claude_home, "codex": cfg.codex_home,
+                      "opencode": cfg.opencode_home}  # 会話の記録を探す既定の場所
         self.sandbox = None  # Codex のサンドボックスが動くか（配信の間、最初に答えるときに 1 回だけ確かめる）
         self.sandbox_lock = threading.Lock()
         self.qa_enabled, self.qa_reason = self.detect_agents()
@@ -1118,8 +1126,8 @@ class App:
         if not self.cfg.qa:
             return False, "質問の受付を無効にして配信している（--no-qa）"
         if not any(a.available() for a in self.agents.values()):
-            return False, "資料を配信しているマシンに claude も codex も見つからない（%s、%s）" % (
-                self.cfg.claude[0], self.cfg.codex[0])
+            return False, "資料を配信しているマシンに claude・codex・opencode のどれも見つからない（%s）" % (
+                "、".join(a.argv[0] for a in self.agents.values()))
         return True, None
 
     def owns(self, m):
@@ -1372,7 +1380,7 @@ class App:
         if not isinstance(ask, dict) or not isinstance(ask.get("questions"), list):
             return None
         view = {k: ask.get(k) for k in ("id", "status", "questions", "created_at", "expires_at", "answers",
-                                        "annotations", "closed_at", "build", "session")}
+                                        "annotations", "selections", "closed_at", "build", "session")}
         view["where"] = os.path.basename(str(ask.get("cwd") or "").rstrip("/"))
         view["agent"] = ask.get("agent") if ask.get("agent") in self.agents else "claude"
         view["agent_name"] = self.agents[view["agent"]].label
@@ -1410,7 +1418,7 @@ class App:
                 return 409, {"error": "待つ時間を過ぎた。ターミナルで答えてください"}
             if not self.waiter_alive(m):
                 return 409, {"error": "%s がもう答えを待っていない（ターミナルで中断された可能性がある）。ターミナルで答えてください" % name}
-            answers, notes = {}, {}
+            answers, notes, selections = {}, {}, {}
             for q in ask["questions"]:
                 a = given.get(q["question"])
                 a = a if isinstance(a, dict) else {}
@@ -1423,11 +1431,14 @@ class App:
                 if not count or (not q["multiSelect"] and count != 1):
                     return 400, {"error": "「%s」は%s" % (q["question"][:60], "1つ以上選ぶ" if q["multiSelect"] else "1つだけ選ぶ")}
                 # 複数選んだときは、選択肢の順に「, 」でつなぐ（ターミナルで選んだときと同じ形）
-                answers[q["question"]] = ", ".join([l for l in labels if l in picked] + ([other] if other else []))
+                chosen = [l for l in labels if l in picked] + ([other] if other else [])
+                answers[q["question"]] = ", ".join(chosen)
+                selections[q["question"]] = chosen
                 note = a["notes"].strip()[:MAX_OTHER] if isinstance(a.get("notes"), str) else ""
                 if note:
                     notes[q["question"]] = {"notes": note}
-            ask.update(status="answered", answers=answers, annotations=notes or None, closed_at=now())
+            ask.update(status="answered", answers=answers, annotations=notes or None, selections=selections,
+                       closed_at=now())
             write_json(m.ask_path, ask)
         self.stop_build(m)
         self.notify_changes()
@@ -1577,12 +1588,12 @@ class App:
         except OSError:
             return ""
 
-    # ---- エージェント（claude -p / codex exec）
+    # ---- エージェント（claude -p / codex exec / opencode run）
 
     def default_agent(self):
-        """資料を作ったセッションが分からないときに答えるエージェント。--agent のもの（使えなければもう一方）。"""
+        """資料を作ったセッションが分からないときに答えるエージェント（--agent のもの。使えなければ次に使えるもの）。"""
         order = [self.cfg.agent] if self.cfg.agent in self.agents else []
-        order += [k for k in ("claude", "codex") if k not in order]
+        order += [k for k in ("claude", "codex", "opencode") if k not in order]
         return next((self.agents[k] for k in order if self.agents[k].available()), self.agents[order[0]])
 
     @staticmethod
@@ -1843,6 +1854,7 @@ class App:
                                           "commands": run.check_argvs, "mcp": not run.local_only})
         cmd = agent.command(run)
         env[ASK_CHILD_ENV] = "1"
+        env.update(agent.run_env(run))
         job = self.job()
         with self.lock:
             # 取り消しと起動が行き違わないよう、取り消しの確認と job.proc の設定を同じロックの中で行う
@@ -2470,7 +2482,7 @@ def serve_main(args):
         print("配信フォルダが無い: %s" % args.dir, file=sys.stderr)
         return 2
     cfg = Config(root=args.dir, port=args.port, bind=args.bind, repo=args.repo, claude=shlex.split(args.claude),
-                 codex=shlex.split(args.codex), agent=args.agent, token=args.token, doc_name=args.doc_name, prompt=args.prompt, check_cmd=args.check_cmd,
+                 codex=shlex.split(args.codex), opencode=shlex.split(args.opencode), agent=args.agent, token=args.token, doc_name=args.doc_name, prompt=args.prompt, check_cmd=args.check_cmd,
                  browser_check=not args.no_browser_check, answer_timeout=args.answer_timeout, model=args.model,
                  qa=not args.no_qa, allow_host=args.allow_host, local_only=args.local_only, private=args.private,
                  workers=args.workers, prefs=os.path.join(ask_home(), VIEWER_PREFS))
@@ -2533,7 +2545,7 @@ def origin_main(args):
     cls = agents_mod.AGENTS[agent]
     sid = sid or os.environ.get(cls.session_env)
     if not sid:
-        print("CLAUDE_CODE_SESSION_ID も CODEX_THREAD_ID も無いため、資料を作ったセッションを記録しなかった。"
+        print("セッションの印（CLAUDE_CODE_SESSION_ID 等）が無いため、資料を作ったセッションを記録しなかった。"
               "ページからの質問には新しいセッションで答える。", file=sys.stderr)
         return 0
     path = record_origin(args.material, sid, args.cwd, agent, os.environ.get(cls.account_env) or None)
@@ -2646,7 +2658,7 @@ def ask_config_main(args):
     label = {"open": "受け箱か質問の資料をブラウザで開いているときだけ、質問をページに出す",
              "always": "常に質問をページに出して待つ", "off": "使わない（いつもどおりターミナルで答える）"}
     effective = ask_effective_mode(conf)
-    print("エージェントの質問（AskUserQuestion・request_user_input）を資料のページで答える: %s（%s%s）" % (
+    print("エージェントの質問（AskUserQuestion・request_user_input・question）を資料のページで答える: %s（%s%s）" % (
         conf["mode"], label[effective], "。受け箱を開いたことがあるため" if conf["mode"] == "auto" and effective == "always"
         else "。受け箱を一度開くと、それ以降は常にページで待つ" if conf["mode"] == "auto" else ""))
     print("受け箱: %s/__qa/inbox?k=%s （開いておくと、質問が来たときにその資料を開く）" % (conf["public_url"], conf["token"]))
@@ -2669,7 +2681,7 @@ def ask_config_main(args):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="visual-explain の資料を配信し、ページからの追加の質問に claude -p で答える")
+    ap = argparse.ArgumentParser(description="visual-explain の資料を配信し、ページからの追加の質問に claude -p・codex exec・opencode run で答える")
     sub = ap.add_subparsers(dest="command", required=True)
     s = sub.add_parser("serve", help="資料のフォルダを配信する")
     s.add_argument("--dir", required=True, help="配信するフォルダ（資料、または資料をまとめた親フォルダ）")
@@ -2680,8 +2692,9 @@ def main(argv=None):
     s.add_argument("--answer-timeout", type=parse_duration, default=parse_duration("15m"), help="1 件の回答の上限（既定 15m）")
     s.add_argument("--claude", default=os.environ.get("VISUAL_EXPLAIN_CLAUDE", "claude"), help="claude を起動するコマンド")
     s.add_argument("--codex", default=os.environ.get("VISUAL_EXPLAIN_CODEX", "codex"), help="codex を起動するコマンド")
-    s.add_argument("--agent", choices=("auto", "claude", "codex"), default="auto",
-                   help="資料を作ったセッションが分からないときに答えるエージェント（既定 auto: 使える方、両方なら claude）")
+    s.add_argument("--opencode", default=os.environ.get("VISUAL_EXPLAIN_OPENCODE", "opencode"), help="opencode を起動するコマンド")
+    s.add_argument("--agent", choices=("auto", "claude", "codex", "opencode"), default="auto",
+                   help="資料を作ったセッションが分からないときに答えるエージェント（既定 auto: 使える方、複数なら claude）")
     s.add_argument("--model", help="回答に使うモデル（既定はエージェントの既定）")
     s.add_argument("--doc-name", default="explanation.html", help="質問欄を差し込む HTML のファイル名")
     s.add_argument("--prompt", default=DEFAULT_PROMPT, help="claude に渡す指示文の雛形")
@@ -2699,11 +2712,11 @@ def main(argv=None):
     o.add_argument("material", help="資料のフォルダ（explanation.html がある所）")
     o.add_argument("--cwd", default=os.getcwd(), help="資料を作ったセッションの作業ディレクトリ")
     o.add_argument("--agent", choices=sorted(agents_mod.AGENTS), help="資料を作ったエージェント（既定は環境変数から判定）")
-    o.add_argument("--session-id", help="既定は環境変数 CLAUDE_CODE_SESSION_ID（Codex は CODEX_THREAD_ID）")
+    o.add_argument("--session-id", help="既定は環境変数（CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / OPENCODE_SESSION_ID）")
     e = sub.add_parser("export", help="回答した質問を、資料の末尾の節に書き出す（ファイルを渡しても読めるように）")
     e.add_argument("material", help="資料のフォルダ、または資料の HTML")
     e.add_argument("--doc-name", default="explanation.html", help="資料の HTML のファイル名（フォルダを渡したとき）")
-    a = sub.add_parser("ask-config", help="エージェントの質問（AskUserQuestion・request_user_input）を資料のページで答える設定（引数なしで今の設定と受け箱の URL を表示）")
+    a = sub.add_parser("ask-config", help="エージェントの質問（AskUserQuestion・request_user_input・question）を資料のページで答える設定（引数なしで今の設定と受け箱の URL を表示）")
     on = a.add_mutually_exclusive_group()
     on.add_argument("--mode", choices=ASK_MODES,
                     help="auto: 受け箱を一度でも開いたら常にページで待ち、それまでは open と同じ（既定）。"

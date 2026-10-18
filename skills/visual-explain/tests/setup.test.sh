@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# setup.sh / teardown.sh のテスト。一時的な HOME で、Claude の settings.json と Codex の hooks.json への登録を確かめる。
+# setup.sh / teardown.sh のテスト。一時的な HOME で、Claude の settings.json・Codex の hooks.json・
+# OpenCode の plugins/visual-explain.js への登録を確かめる。
 #   usage: bash skills/visual-explain/tests/setup.test.sh
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,13 +11,15 @@ ok() { printf '  ok   %s\n' "$1"; }
 ng() { printf '  FAIL %s\n' "$1"; fail=1; }
 check() { if eval "$2" >/dev/null 2>&1; then ok "$1"; else ng "$1"; fi; }
 fresh() {
-  T="$(mktemp -d "$ROOT/home.XXXX")"; mkdir -p "$T/.claude" "$T/.codex"
+  T="$(mktemp -d "$ROOT/home.XXXX")"; mkdir -p "$T/.claude" "$T/.codex" "$T/.config/opencode/plugins"
   printf '{"permissions":{"allow":["Bash(ls:*)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo keep"}]}]}}\n' > "$T/.claude/settings.json"
   printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo other"}]}]}}\n' > "$T/.codex/hooks.json"
 }
-run() { env -u CLAUDE_CONFIG_DIR -u CODEX_HOME HOME="$T" bash "$SKILL/$1" "${@:2}"; }
+run() { env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u OPENCODE_CONFIG_DIR -u XDG_CONFIG_HOME HOME="$T" bash "$SKILL/$1" "${@:2}"; }
 # count <JSON> <含む文字列> <イベント>: そのイベントで、コマンドに文字列を含む hook の数
 count() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(sum(sys.argv[2] in h["command"] for g in d.get("hooks",{}).get(sys.argv[3],[]) for h in g["hooks"]))' "$@"; }
+# OpenCode の設定フォルダに置く登録ファイル
+plug() { echo "$T/.config/opencode/plugins/visual-explain.js"; }
 
 echo "== setup.sh"
 fresh
@@ -30,6 +33,39 @@ check "呼び出されたパスをそのまま書く" "grep -q '$SKILL/scripts/a
 check "Codex の /hooks での信頼を案内する" "grep -q '/hooks' <<<\"\$out\""
 run setup.sh >/dev/null 2>&1
 check "2 回実行しても重複しない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 1 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
+check "OpenCode の plugins に登録ファイルを 1 つ置く" "[ \$(grep -c 'export { default } from' \"\$(plug)\") = 1 ] && grep -q \"$SKILL/opencode/plugin.js\" \"\$(plug)\""
+check "登録ファイルはスキルの plugin を読み込むだけ" "[ \$(wc -l < \"\$(plug)\") -le 3 ]"
+check "OpenCode を起動し直す案内をする" "grep -q '起動し直すと効く' <<<\"\$out\""
+
+echo "== OpenCode の plugin"
+fresh
+mkdir -p "$T/.config/opencode/plugins"
+printf '// ほかのツールの plugin\n' > "$T/.config/opencode/plugins/orca.js"
+run setup.sh >/dev/null 2>&1
+check "ほかの plugin は残す" "grep -q 'ほかのツールの plugin' '$T/.config/opencode/plugins/orca.js'"
+run setup.sh >/dev/null 2>&1
+check "2 回実行しても 1 つだけ（置き直す）" "[ \$(ls '$T/.config/opencode/plugins' | wc -l) = 2 ] && [ \$(grep -c 'export { default } from' \"\$(plug)\") = 1 ]"
+fresh
+run setup.sh --opencode >/dev/null 2>&1
+check "--opencode なら Claude と Codex には足さない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 0 ] && [ -e \"\$(plug)\" ]"
+fresh
+run setup.sh --codex >/dev/null 2>&1
+check "--codex なら OpenCode には置かない" "[ ! -e \"\$(plug)\" ]"
+fresh
+ln -s "$SKILL" "$ROOT/oc-link-$$"
+env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u OPENCODE_CONFIG_DIR -u XDG_CONFIG_HOME HOME="$T" \
+  bash "$ROOT/oc-link-$$/setup.sh" --opencode >/dev/null 2>&1
+check "呼び出されたパスをそのまま書く（リンクでも解決しない）" "grep -q '$ROOT/oc-link-$$/opencode/plugin.js' \"\$(plug)\""
+fresh
+mkdir -p "$T/.config/opencode/plugins"
+printf '// 同じ名前の別の plugin\n' > "$(plug)"
+out="$(run setup.sh --opencode 2>&1)"; code=$?
+check "同じ名前の別のファイルは書き換えずに止める" "[ $code -ne 0 ] && grep -q '別のファイル' <<<\"\$out\" && grep -q '同じ名前の別の plugin' \"\$(plug)\""
+fresh
+rm -rf "$T/.config/opencode"
+env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u OPENCODE_CONFIG_DIR -u XDG_CONFIG_HOME HOME="$T" PATH="/usr/bin:/bin" \
+  bash "$SKILL/setup.sh" >/dev/null 2>&1
+check "OpenCode の設定フォルダも opencode も無ければ登録しない" "[ ! -e \"\$(plug)\" ]"
 
 echo "== 再実行・別のパス・リンク"
 fresh
@@ -76,5 +112,17 @@ run setup.sh >/dev/null 2>&1
 run teardown.sh >/dev/null 2>&1
 check "足した項目だけを外す" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py SessionStart) = 0 ] && grep -q 'echo keep' '$T/.claude/settings.json' && grep -q 'echo other' '$T/.codex/hooks.json'"
 check "空になったイベントは消す" "python3 -c 'import json; d=json.load(open(\"$T/.codex/hooks.json\")); assert \"PreToolUse\" not in d[\"hooks\"]'"
+check "OpenCode の登録ファイルを外す" "[ ! -e '$T/.config/opencode/plugins/visual-explain.js' ]"
+fresh
+run setup.sh --opencode >/dev/null 2>&1
+mkdir -p "$T/.config/opencode/plugins"
+printf '// 別のツールの plugin\n' > "$T/.config/opencode/plugins/other.js"
+run teardown.sh --opencode >/dev/null 2>&1
+check "OpenCode は自分の登録だけを外し、ほかを残す" "[ ! -e '$T/.config/opencode/plugins/visual-explain.js' ] && grep -q '別のツールの plugin' '$T/.config/opencode/plugins/other.js'"
+fresh
+mkdir -p "$T/.config/opencode/plugins"
+printf '// 自分が置いたものではない\n' > "$T/.config/opencode/plugins/visual-explain.js"
+run teardown.sh --opencode >/dev/null 2>&1
+check "自分が置いていない同名ファイルは外さない" "grep -q '自分が置いたものではない' '$T/.config/opencode/plugins/visual-explain.js'"
 
 [ "$fail" = 0 ] && echo "ALL PASSED" || { echo "SOME FAILED"; exit 1; }
