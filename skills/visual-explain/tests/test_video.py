@@ -52,6 +52,30 @@ class StoryFixture:
     def save(self):
         self.path.write_text(json.dumps(self.story, ensure_ascii=False), encoding="utf-8")
 
+    def fake_voicevox(self, seconds, requests):
+        """話者「試験話者」が、どの文も同じ長さの音で読む VOICEVOX エンジンの代役を起動し、URL を返す。"""
+        audio = self.root / "voice.wav"
+        tone(audio, seconds)
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps([{"name": "試験話者", "styles": [{"id": 11, "name": "ノーマル"}]}]).encode()
+                self.send_response(200); self.end_headers(); self.wfile.write(body)
+
+            def do_POST(self):
+                url = urllib.parse.urlsplit(self.path)
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                requests.append((url.path, urllib.parse.parse_qs(url.query), json.loads(body) if body else None))
+                self.send_response(200); self.end_headers()
+                self.wfile.write(audio.read_bytes() if url.path == "/synthesis" else b'{"speedScale":1}')
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d" % server.server_port
+
 
 class StoryTest(StoryFixture, unittest.TestCase):
     def test_bad_inputs_fail_before_creating_output(self):
@@ -161,28 +185,8 @@ class StoryTest(StoryFixture, unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg がない")
     def test_voicevox_uses_local_synthesis_reading_and_credit(self):
-        audio = self.root / "voice.wav"
-        tone(audio, 0.9)
         requests = []
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def do_GET(self):
-                body = json.dumps([{"name": "試験話者", "styles": [{"id": 11, "name": "ノーマル"}]}]).encode()
-                self.send_response(200); self.end_headers(); self.wfile.write(body)
-
-            def do_POST(self):
-                url = urllib.parse.urlsplit(self.path)
-                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-                requests.append((url.path, urllib.parse.parse_qs(url.query), json.loads(body) if body else None))
-                self.send_response(200); self.end_headers()
-                self.wfile.write(audio.read_bytes() if url.path == "/synthesis" else b'{"speedScale":1}')
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        args = SimpleNamespace(speech="voicevox", voicevox_url="http://127.0.0.1:%d" % server.server_port,
+        args = SimpleNamespace(speech="voicevox", voicevox_url=self.fake_voicevox(0.9, requests),
                                voicevox_speaker=11, speed=1.05, ffmpeg="ffmpeg")
         video.prepare_voicevox(args)
         self.assertEqual(args.speech_credit, "VOICEVOX:試験話者")
@@ -314,6 +318,19 @@ class RenderTest(StoryFixture, unittest.TestCase):
         self.assertIn("Docker が見つからない", page)
         self.assertIn("音声はありません", page)
         self.assertEqual(len(timing["cues"]), 2)
+
+    def test_voicevox_credit_is_kept_off_the_frames(self):
+        # 話者名は画面に描かず、再生ページ・解説原稿・MP4 のメタデータにクレジットとして残す。
+        silent, _, _ = self.generate("none")
+        silent.rename(self.root / "silent")
+        out, data, timing = self.generate("voicevox", extra=("--voicevox-url", self.fake_voicevox(0.4, [])))
+        self.assertEqual(timing["speech"], "voicevox")
+        for i in (1, 2):
+            frame = "frames/%03d.png" % i
+            self.assertEqual((out / frame).read_bytes(), (self.root / "silent" / frame).read_bytes(), frame)
+        self.assertIn("VOICEVOX:試験話者", (out / "explanation.html").read_text())
+        self.assertIn("VOICEVOX:試験話者", (out / "transcript.txt").read_text())
+        self.assertIn("VOICEVOX:試験話者", data["format"]["tags"]["comment"])
 
     def test_auto_preserves_complete_recordings_without_preparing_synthesis(self):
         for i, scene in enumerate(self.story["scenes"]):

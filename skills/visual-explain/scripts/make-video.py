@@ -189,7 +189,7 @@ def browser(explicit):
     return [chrome] + module.headless_flag(chrome)
 
 
-def render_frame(chrome, scene, index, count, work, credit=""):
+def render_frame(chrome, scene, index, count, work):
     """図を縮尺を保って収め、テロップと字幕の場所を別に確保する。"""
     page = work / "frame.html"
     clip = scene.get("clip")
@@ -216,15 +216,14 @@ img { width:1168px; height:378px; object-fit:contain }
  color:#f7faff; font-family:system-ui,sans-serif } header { display:flex; align-items:center; gap:24px }
 .count { color:#77e4cb; font-size:22px } h1 { margin:0; line-height:1.3; white-space:nowrap }
 .visual { margin:0 40px; overflow:hidden }
-.telop { margin:0 48px; padding-bottom:%dpx; display:flex; gap:20px; align-items:center }
+.telop { margin:0 48px; display:flex; gap:20px; align-items:center }
 .label { color:#77e4cb; font-size:20px; flex-shrink:0 }
 .message { font-weight:700; line-height:1.4 }
 .subtitles { border-top:1px solid #31435b; height:98px; background:#081321 }
-.credit { position:absolute; left:48px; top:599px; color:#b8c9dd; font-size:16px }
 %s
 </style><header><span class="count">%02d / %02d</span><h1>%s</h1>%s</header>
 <div class="visual"><img src="%s" alt="説明の図"></div>
-<div class="telop"><span class="label">要点</span><div class="message">%s</div></div><div class="subtitles"></div><div class="credit">%s</div>
+<div class="telop"><span class="label">要点</span><div class="message">%s</div></div><div class="subtitles"></div>
 <script>addEventListener('load', async () => {
  await document.fonts.ready;
  const errors = [];
@@ -239,8 +238,8 @@ img { width:1168px; height:378px; object-fit:contain }
  }
  const report = document.createElement('pre'); report.id = 'report'; report.hidden = true;
  report.textContent = JSON.stringify(errors); document.body.append(report);
-});</script></html>''' % (24 if credit else 0, layout, index, count, html.escape(scene["title"]), badges,
-                         html.escape(source.as_uri(), quote=True), html.escape(scene["telop"]), html.escape(credit)), encoding="utf-8")
+});</script></html>''' % (layout, index, count, html.escape(scene["title"]), badges,
+                         html.escape(source.as_uri(), quote=True), html.escape(scene["telop"])), encoding="utf-8")
     frame = work / "frames" / ("%03d.png" % index)
     result = run(chrome + ["--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
                           "--allow-file-access-from-files", "--force-device-scale-factor=1",
@@ -622,10 +621,8 @@ def main():
             # 台本・画像の不備を、音声の自動切り替えや Docker の準備より先に見つける。
             for i, scene in enumerate(story["scenes"], 1):
                 render_frame(chrome, scene, i, len(story["scenes"]), work)
+            # 話者名（VOICEVOX のクレジット）は画面に出さず、再生ページ・解説原稿・MP4 のメタデータに残す。
             timeline, cues = choose_audio(story, args, work, prepare_voicevox, make_audio)
-            if args.speech_credit:
-                for i, scene in enumerate(story["scenes"], 1):
-                    render_frame(chrome, scene, i, len(story["scenes"]), work, args.speech_credit)
             write_subtitles(cues, work)
             encode(story, timeline, cues, args, work)
             write_page(story, timeline, cues, args, work)
