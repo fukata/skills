@@ -145,7 +145,7 @@ python3 <skill>/scripts/make-video.py <台本.json> --out <新しい出力フォ
   --speech voicevox --voicevox-url http://127.0.0.1:50021 --voicevox-speaker 11
 ```
 
-`--voicevox-speaker` はエンジンの `/speakers` で得られるスタイル ID。既定の 11 は玄野武宏・ノーマル。話者の存在を確かめてから合成し、実際の話者名を動画・再生ページ・原稿に記す。話速は `--speed` で調整できる。
+`--voicevox-speaker` はエンジンの `/speakers` で得られるスタイル ID。既定の 11 は玄野武宏・ノーマル。話者の存在を確かめてから合成し、実際の話者名を再生ページ・解説原稿・MP4 のメタデータ（comment）に記す。動画の画面には出さない。話速は `--speed` で調整できる。
 
 Docker を使う起動例（必要な場合にだけ実行し、使い終わったら自分が作ったコンテナーだけを停止する）:
 
@@ -153,7 +153,7 @@ Docker を使う起動例（必要な場合にだけ実行し、使い終わっ�
 docker run --rm --name visual-explain-voicevox -p 127.0.0.1:50021:50021 voicevox/voicevox_engine:cpu-latest
 ```
 
-音声の利用条件は [VOICEVOX の利用規約](https://voicevox.hiroshiba.jp/term/) と各話者の規約で確認する。クレジットは動画にも表示されるため、MP4 単体で渡す場合も残る。
+音声の利用条件は [VOICEVOX の利用規約](https://voicevox.hiroshiba.jp/term/) と各話者の規約で確認する。VOICEVOX の規約では、利用したことが分かるクレジット表記（例: VOICEVOX:玄野武宏）が要る。表記する場所は決められていないので、画面には出さず、再生ページ・解説原稿・MP4 のメタデータに残す。MP4 だけを渡すとき（チャットへの投稿・チケットへの添付など）は、添える文にクレジットを書く。
 
 同梱の例を使って試す:
 
