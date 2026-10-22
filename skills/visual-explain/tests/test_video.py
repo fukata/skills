@@ -81,6 +81,24 @@ class StoryTest(StoryFixture, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "audio"):
             video.load_story(self.path, "recorded")
 
+    def test_recording_scene_inputs_are_checked(self):
+        clip = self.root / "録画.webm"
+        clip.write_bytes(b"")
+        base = {"title": "録画", "video": clip.name, "telop": "要点"}
+        for extra, message in [({"image": self.image.name}, "どちらか一つ"), ({"video": self.image.name}, "WebM"),
+                               ({"start": 3, "end": 2}, "end は start"), ({"speed": 32}, "speed"),
+                               ({"crop": "100x100"}, "crop"), ({"crop": "8:8:0:0"}, "crop"), ({"crop": [1, 2, 3, 4]}, "crop")]:
+            self.story["scenes"][0] = dict(base, **extra)
+            self.save()
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, message):
+                video.load_story(self.path, "none")
+        self.story["scenes"][0] = dict(base, crop="160:90:8:4", start=1, speed=2.5)
+        self.save()
+        scene = video.load_story(self.path, "none")["scenes"][0]
+        self.assertEqual((scene["crop"], scene["start"], scene["speed"]), ((160, 90, 8, 4), 1.0, 2.5))
+        self.assertEqual(video.speed_label(2.5), "早送り ×2.5")
+        self.assertEqual(video.speed_label(0.5), "スロー ×0.5")
+
     def test_caption_escapes_markup_and_rejects_overlong_text(self):
         video.write_subtitles([{"start": 0.9996, "end": 2, "text": "<b>文字</b> & 矢印 -->"}], self.root)
         value = (self.root / "captions.vtt").read_text()
@@ -196,8 +214,67 @@ class RenderTest(StoryFixture, unittest.TestCase):
         argv.extend(extra)
         result = subprocess.run(argv, capture_output=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.stdout = result.stdout.decode()
         data = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(out / "explanation.mp4")]))
         return out, data, json.loads((out / "timeline.json").read_text())
+
+    def make_clip(self, seconds=4):
+        # 秒数の表示と流れる帯が動く、録画の代わりの映像。
+        clip = self.root / "録画 ' 画面.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30:duration=%d" % seconds,
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip)], check=True)
+        return clip
+
+    def frame(self, movie, at):
+        """録画を置く枠の中の画面を、明るさだけの画素の並びで取り出す。"""
+        left, top, width, height = video.CLIP_BOX
+        return subprocess.check_output(["ffmpeg", "-v", "error", "-ss", str(at), "-i", str(movie), "-frames:v", "1",
+            "-vf", "crop=%d:%d:%d:%d,format=gray" % (width, height, left, top), "-f", "rawvideo", "-"])
+
+    def changed_pixels(self, first, second):
+        return sum(abs(a - b) > 40 for a, b in zip(first, second))
+
+    def test_recording_scene_is_sped_up_cropped_and_held_until_narration_ends(self):
+        clip = self.make_clip()
+        for i, duration in enumerate([3.0, 0.5]):
+            audio = self.root / ("解説 %d.wav" % i)
+            tone(audio, duration)
+            self.story["scenes"][i]["narration"][0]["audio"] = audio.name
+        self.story["scenes"][0] = dict(self.story["scenes"][0], video=clip.name, start=0.5, end=3.5, speed=2, crop="160:180:160:0")
+        del self.story["scenes"][0]["image"]
+        out, data, timing = self.generate("recorded")
+        self.assertNotIn("録画の場面（video）が無い", self.stdout)
+        self.assertEqual(timing["scenes"][0]["video"], {"source": clip.name, "start": 0.5, "end": 3.5, "speed": 2.0,
+                                                         "crop": "160:180:160:0", "seconds": 1.5})
+        self.assertNotIn("video", timing["scenes"][1])
+        # 1.5 秒の録画より解説（3 秒）が長いので、場面は解説が終わるまで続く。
+        self.assertGreaterEqual(timing["scenes"][0]["duration"], video.LEAD + 3.0 + video.GAP + video.TAIL)
+        self.assertAlmostEqual(float(data["format"]["duration"]), timing["duration"], delta=0.08)
+        self.assertIn("audio", {s["codec_type"] for s in data["streams"]})
+        movie = out / "explanation.mp4"
+        first, second, held, later = (self.frame(movie, at) for at in (0.2, 1.3, 2.2, 3.6))
+        self.assertGreater(self.changed_pixels(first, second), 200)  # 録画が動いている
+        # 録画が終わった後も、黒い画面ではなく録画の最後の画面を止めて見せる。
+        self.assertLess(self.changed_pixels(held, later), 20)
+        self.assertGreater(sum(v > 60 for v in later), len(later) // 5)
+        page = (out / "explanation.html").read_text()
+        self.assertIn("場面 01 は実際の画面の録画", page)
+        self.assertIn("実際の画面の録画（早送り ×2）", page)
+        self.assertIn("映像: 実際の画面の録画（早送り ×2）", (out / "transcript.txt").read_text())
+        self.assertFalse(list(out.glob("poster-*")))
+
+    def test_recording_scene_outside_the_clip_fails_before_output(self):
+        clip = self.make_clip(2)
+        for extra, message in [({"crop": "400:100:0:0"}, "はみ出す"), ({"end": 9}, "収まらない"), ({"start": 5}, "収まらない")]:
+            self.story["scenes"][0] = dict({"title": "録画", "video": clip.name, "telop": "要点"}, **extra)
+            self.save()
+            out = self.root / "failed"
+            result = subprocess.run([sys.executable, "-I", str(SCRIPT), str(self.path), "--out", str(out), "--speech", "none"],
+                                    capture_output=True, timeout=60)
+            with self.subTest(extra=extra):
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr.decode())
+                self.assertFalse(out.exists())
 
     def test_recorded_audio_is_not_cut_and_captions_follow_actual_durations(self):
         for i, duration in enumerate([0.7, 1.3]):
@@ -251,6 +328,7 @@ class RenderTest(StoryFixture, unittest.TestCase):
 
     def test_silent_burned_video_has_no_audio_or_duplicate_caption_track(self):
         out, data, timing = self.generate("none", burn=True)
+        self.assertIn("冒頭に機能の全体が分かる", self.stdout)
         self.assertEqual({s["codec_type"] for s in data["streams"]}, {"video"})
         self.assertNotIn("<track", (out / "explanation.html").read_text())
         self.assertIn("音声はありません", (out / "explanation.html").read_text())

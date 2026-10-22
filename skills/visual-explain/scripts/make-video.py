@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""図・テロップ・文ごとの字幕と音声から説明動画を作る。音声合成はローカルで行う。"""
+"""図・録画・テロップ・文ごとの字幕と音声から説明動画を作る。音声合成はローカルで行う。"""
 
 import argparse
 import html
@@ -29,6 +29,10 @@ from video_speech import SpeechError, VoicevoxUnavailable, choose_audio  # noqa:
 
 WIDTH, HEIGHT, FPS, RATE = 1280, 720, 24, 48000
 LEAD, GAP, TAIL = 0.35, 0.2, 0.55
+IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".svg"}
+VIDEO_TYPES = {".webm", ".mp4", ".mov", ".mkv", ".m4v"}
+# 録画の場面で映像を置く枠（左・上・幅・高さ）。見出しと要点を細くし、字幕の帯は図の場面と同じ位置に残す。
+CLIP_BOX = (40, 58, 1200, 496)
 
 
 def run(argv, timeout=300, **kwargs):
@@ -75,9 +79,14 @@ def load_story(path, speech):
             raise ValueError("場面 %d はオブジェクトにする" % i)
         scene["title"] = text(scene.get("title"), "場面 %d の title" % i, 40)
         scene["telop"] = text(scene.get("telop"), "場面 %d の telop" % i, 60)
-        scene["image"] = local_file(path.parent, scene.get("image"), "場面 %d の image" % i)
-        if scene["image"].suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".svg"}:
-            raise ValueError("image は PNG・JPEG・WebP・SVG にする")
+        if ("image" in scene) == ("video" in scene):
+            raise ValueError("場面 %d には image か video のどちらか一つを指定する" % i)
+        if "image" in scene:
+            scene["image"] = local_file(path.parent, scene.get("image"), "場面 %d の image" % i)
+            if scene["image"].suffix.lower() not in IMAGE_TYPES:
+                raise ValueError("image は PNG・JPEG・WebP・SVG にする")
+        else:
+            load_clip(path.parent, scene, i)
         scene["seconds"] = number(scene.get("seconds", 1), "場面の seconds")
         narration = scene.get("narration", [])
         if not isinstance(narration, list) or len(narration) > 100:
@@ -101,6 +110,75 @@ def load_story(path, speech):
     return {"title": title, "scenes": scenes}
 
 
+def load_clip(base, scene, i):
+    """実際の画面の録画を使う場面の、切り出す範囲・倍率・拡大する領域を読む。"""
+    scene["video"] = local_file(base, scene.get("video"), "場面 %d の video" % i)
+    if scene["video"].suffix.lower() not in VIDEO_TYPES:
+        raise ValueError("video は WebM・MP4・MOV・MKV にする")
+    scene["start"] = number(scene.get("start", 0), "場面 %d の start" % i, 0, 36000)
+    if "end" in scene:
+        scene["end"] = number(scene["end"], "場面 %d の end" % i, 0, 36000)
+        if scene["end"] <= scene["start"]:
+            raise ValueError("場面 %d の end は start より後にする" % i)
+    scene["speed"] = number(scene.get("speed", 1), "場面 %d の speed" % i, 0.25, 16)
+    if "crop" in scene:
+        match = re.fullmatch(r"(\d{1,5}):(\d{1,5}):(\d{1,5}):(\d{1,5})", scene["crop"]) if isinstance(scene["crop"], str) else None
+        if not match or int(match.group(1)) < 16 or int(match.group(2)) < 16:
+            raise ValueError("場面 %d の crop は「幅:高さ:左:上」のピクセル数にする（幅・高さは 16 以上）" % i)
+        scene["crop"] = tuple(int(v) for v in match.groups())
+
+
+def probe_clip(ffprobe, scene, i):
+    """録画の大きさと長さを読み、切り出す範囲が録画に収まるか確かめ、映像を置く位置を決める。"""
+    try:
+        info = json.loads(run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                               "stream=width,height:format=duration", "-of", "json", scene["video"]], timeout=60))
+        width, height = int(info["streams"][0]["width"]), int(info["streams"][0]["height"])
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise ValueError("場面 %d の video を動画として読めない: %s" % (i, scene["video"].name)) from exc
+    try:
+        length = float(info["format"]["duration"])
+    except (KeyError, TypeError, ValueError):
+        # 録画ツールの WebM は全体の長さを持たないことがあるので、映像の最後の時刻で測る。
+        times = run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time",
+                     "-of", "csv=p=0", scene["video"]], timeout=120).decode("utf-8", "replace").split()
+        length = max((float(t) for t in times if re.fullmatch(r"\d+(\.\d+)?", t)), default=0.0)
+    end = scene.get("end", length)
+    if not length or scene["start"] >= length or end > length + 0.05:
+        raise ValueError("場面 %d の start・end が録画の長さ（%.2f 秒）に収まらない" % (i, length))
+    crop = scene.get("crop", (width, height, 0, 0))
+    if crop[0] + crop[2] > width or crop[1] + crop[3] > height:
+        raise ValueError("場面 %d の crop が録画（%d×%d）からはみ出す" % (i, width, height))
+    left, top, box_width, box_height = CLIP_BOX
+    scale = min(box_width / crop[0], box_height / crop[1])
+    w, h = (min(limit, max(2, round(v * scale / 2) * 2)) for v, limit in ((crop[0], box_width), (crop[1], box_height)))
+    scene["clip"] = {"width": w, "height": h, "x": left + (box_width - w) // 2, "y": top + (box_height - h) // 2,
+                     "crop": crop, "end": end, "seconds": (end - scene["start"]) / scene["speed"]}
+    # 解説が短くても録画は最後まで見せる。解説が長ければ、録画の最後の画面を止めて待つ。
+    scene["seconds"] = max(scene["seconds"], scene["clip"]["seconds"])
+
+
+def clip_filter(scene):
+    clip = scene["clip"]
+    return "crop=%d:%d:%d:%d,scale=%d:%d,setsar=1" % (clip["crop"] + (clip["width"], clip["height"]))
+
+
+def clip_poster(ffmpeg, scene, i, work):
+    """場面の画像（再生前の表示と字幕の位置の確認に使う）に、録画の最初の画面を置く。"""
+    poster = work / ("poster-%03d.png" % i)
+    run([ffmpeg, "-v", "error", "-nostdin", "-y", "-ss", "%.3f" % scene["start"], "-i", scene["video"],
+         "-frames:v", "1", "-vf", clip_filter(scene), poster], timeout=120)
+    if not poster.is_file():
+        raise ValueError("場面 %d の録画から最初の画面を取り出せなかった" % i)
+    scene["poster"] = poster
+
+
+def speed_label(speed):
+    if speed == 1:
+        return ""
+    return "%s ×%g" % ("早送り" if speed > 1 else "スロー", speed)
+
+
 def browser(explicit):
     spec = importlib.util.spec_from_file_location("ve_check", SKILL / "scripts/check-explanation.py")
     module = importlib.util.module_from_spec(spec)
@@ -114,21 +192,37 @@ def browser(explicit):
 def render_frame(chrome, scene, index, count, work, credit=""):
     """図を縮尺を保って収め、テロップと字幕の場所を別に確保する。"""
     page = work / "frame.html"
+    clip = scene.get("clip")
+    if clip:
+        # 録画は図より大きく見せ、実際の画面であることと早送りの倍率を見出しの右に出す。
+        layout = '''header { height:58px; padding:0 48px } h1 { font-size:26px }
+.visual { position:relative; height:496px; background:#000; border-radius:10px }
+img { position:absolute; left:%dpx; top:%dpx; width:%dpx; height:%dpx }
+.badges { margin-left:auto; display:flex; gap:10px } .badge { padding:3px 12px; border:2px solid #77e4cb;
+ border-radius:999px; color:#77e4cb; font-size:17px; font-weight:700; white-space:nowrap }
+.telop { height:68px } .message { font-size:26px; white-space:nowrap }''' % (
+            clip["x"] - CLIP_BOX[0], clip["y"] - CLIP_BOX[1], clip["width"], clip["height"])
+        badges = "".join('<span class="badge">%s</span>' % html.escape(v) for v in ("実際の画面の録画", speed_label(scene["speed"])) if v)
+        source, badges = scene["poster"], '<div class="badges">%s</div>' % badges
+    else:
+        layout = '''header { height:94px; padding:22px 48px } h1 { font-size:32px }
+.visual { height:402px; display:flex; align-items:center; justify-content:center; background:#f7f9fc; border-radius:14px }
+img { width:1168px; height:378px; object-fit:contain }
+.telop { height:126px } .message { font-size:30px }'''
+        source, badges = scene["image"], ""
     page.write_text('''<!doctype html><html lang="ja"><meta charset="utf-8">
 <style>
 * { box-sizing:border-box } body { margin:0; width:1280px; height:720px; background:#101d30;
- color:#f7faff; font-family:system-ui,sans-serif } header { height:94px; padding:22px 48px;
- display:flex; align-items:center; gap:24px } .count { color:#77e4cb; font-size:22px }
-h1 { margin:0; font-size:32px; line-height:1.3; white-space:nowrap }
-.visual { margin:0 40px; height:402px; display:flex; align-items:center; justify-content:center;
- background:#f7f9fc; border-radius:14px; overflow:hidden }
-img { width:1168px; height:378px; object-fit:contain }
-.telop { height:126px; margin:0 48px; padding-bottom:%dpx; display:flex; gap:20px; align-items:center }
+ color:#f7faff; font-family:system-ui,sans-serif } header { display:flex; align-items:center; gap:24px }
+.count { color:#77e4cb; font-size:22px } h1 { margin:0; line-height:1.3; white-space:nowrap }
+.visual { margin:0 40px; overflow:hidden }
+.telop { margin:0 48px; padding-bottom:%dpx; display:flex; gap:20px; align-items:center }
 .label { color:#77e4cb; font-size:20px; flex-shrink:0 }
-.message { font-size:30px; font-weight:700; line-height:1.4 }
+.message { font-weight:700; line-height:1.4 }
 .subtitles { border-top:1px solid #31435b; height:98px; background:#081321 }
 .credit { position:absolute; left:48px; top:599px; color:#b8c9dd; font-size:16px }
-</style><header><span class="count">%02d / %02d</span><h1>%s</h1></header>
+%s
+</style><header><span class="count">%02d / %02d</span><h1>%s</h1>%s</header>
 <div class="visual"><img src="%s" alt="説明の図"></div>
 <div class="telop"><span class="label">要点</span><div class="message">%s</div></div><div class="subtitles"></div><div class="credit">%s</div>
 <script>addEventListener('load', async () => {
@@ -136,15 +230,17 @@ img { width:1168px; height:378px; object-fit:contain }
  const errors = [];
  const img = document.querySelector('img');
  if (!img.complete || !img.naturalWidth) errors.push('図を読み込めない');
- for (const selector of ['h1', '.message']) {
-  const el = document.querySelector(selector), r = el.getBoundingClientRect();
+ for (const selector of ['h1', '.badges', '.message']) {
+  const el = document.querySelector(selector);
+  if (!el) continue;
+  const r = el.getBoundingClientRect();
   if (el.scrollWidth > el.clientWidth + 1 || r.right > 1232 || r.bottom > 622)
    errors.push(selector + ' の文字が表示領域からはみ出す');
  }
  const report = document.createElement('pre'); report.id = 'report'; report.hidden = true;
  report.textContent = JSON.stringify(errors); document.body.append(report);
-});</script></html>''' % (24 if credit else 0, index, count, html.escape(scene["title"]),
-                         html.escape(scene["image"].as_uri(), quote=True), html.escape(scene["telop"]), html.escape(credit)), encoding="utf-8")
+});</script></html>''' % (24 if credit else 0, layout, index, count, html.escape(scene["title"]), badges,
+                         html.escape(source.as_uri(), quote=True), html.escape(scene["telop"]), html.escape(credit)), encoding="utf-8")
     frame = work / "frames" / ("%03d.png" % index)
     result = run(chrome + ["--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
                           "--allow-file-access-from-files", "--force-device-scale-factor=1",
@@ -301,6 +397,11 @@ def make_audio(story, args, work):
         timeline.append({"scene": index, "title": scene["title"], "telop": scene["telop"],
                          "start": round(offset, 6), "end": round(offset + duration, 6),
                          "duration": duration, "cues": scene_cues})
+        if "clip" in scene:
+            clip = scene["clip"]
+            timeline[-1]["video"] = {"source": scene["video"].name, "start": scene["start"], "end": clip["end"],
+                                     "speed": scene["speed"], "crop": "%d:%d:%d:%d" % clip["crop"],
+                                     "seconds": round(clip["seconds"], 6)}
         offset += duration
     return timeline, cues
 
@@ -369,22 +470,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def encode(story, timeline, cues, args, work):
-    for item in timeline:
+    for scene, item in zip(story["scenes"], timeline):
         i = item["scene"]
         print("動画を作成: %d/%d %s" % (i, len(timeline), item["title"]), flush=True)
         filters = "format=yuv420p"
         if args.burn_captions and item["cues"]:
             burn_subtitles(item["cues"], work / "scene.ass", args.font)
             filters += ",ass=scene.ass"
-        command = [args.ffmpeg, "-v", "error", "-nostdin", "-y", "-loop", "1", "-framerate", FPS,
-                   "-i", "frames/%03d.png" % i, "-i", "audio-%03d.wav" % i,
-                   "-t", "%.6f" % item["duration"], "-vf", filters, "-c:v", "libx264", "-preset", "veryfast",
-                   "-crf", "20", "-threads", "2", "-video_track_timescale", "24000"]
+        command = [args.ffmpeg, "-v", "error", "-nostdin", "-y", "-loop", "1", "-framerate", FPS, "-i", "frames/%03d.png" % i]
+        clip = scene.get("clip")
+        if clip:
+            command += ["-ss", "%.3f" % scene["start"], "-t", "%.3f" % (clip["end"] - scene["start"]), "-i", scene["video"]]
+        command += ["-i", "audio-%03d.wav" % i, "-t", "%.6f" % item["duration"]]
+        if clip:
+            # 録画を切り出して倍率どおりに速め、場面の画像の枠に重ねる。録画が先に終われば最後の画面を止めて見せる。
+            command += ["-filter_complex", "[1:v]%s,setpts=(PTS-STARTPTS)/%r,fps=%d,tpad=stop_mode=clone:stop_duration=%.3f[clip];"
+                        "[0:v][clip]overlay=%d:%d,%s[v]" % (clip_filter(scene), scene["speed"], FPS, item["duration"],
+                                                            clip["x"], clip["y"], filters), "-map", "[v]"]
+        else:
+            command += ["-vf", filters]
+        command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "2", "-video_track_timescale", "24000"]
         if args.speech == "none":
             command += ["-an"]
         else:
-            # 場面の接続時に AAC の先読み分が積み重ならないよう、ここでは PCM のままにする。
-            command += ["-c:a", "pcm_s16le"]
+            # 場面の接続時に AAC の先読み分が積み重ならないよう、ここでは PCM のままにする。録画の音は使わない。
+            command += (["-map", "2:a"] if clip else []) + ["-c:a", "pcm_s16le"]
         run(command + ["segment-%03d.mkv" % i], cwd=work)
     (work / "segments.txt").write_text("".join("file 'segment-%03d.mkv'\n" % s["scene"] for s in timeline), encoding="utf-8")
     command = [args.ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "concat", "-safe", "1", "-i", "segments.txt"]
@@ -402,16 +512,24 @@ def write_page(story, timeline, cues, args, work):
     selection = '<details class="more"><summary>音声の選択結果</summary><ol>%s</ol></details>' % "".join(
         "<li>%s</li>" % esc(item["reason"]) for item in events)
     transcript = [story["title"], "音声: " + args.speech_label] + [item["reason"] for item in events]
-    sections = []
+    sections, recorded = [], []
     for scene, timing in zip(story["scenes"], timeline):
         i = timing["scene"]
+        footage = ""
+        if "clip" in scene:
+            recorded.append("%02d" % i)
+            footage = "実際の画面の録画" + ("（%s）" % speed_label(scene["speed"]) if scene["speed"] != 1 else "")
         sections.append('<section id="scene-%d"><h2>%02d · %s</h2><p class="key">%s</p>'
-                        '<figure><img src="frames/%03d.png" alt="%s"><figcaption>%s〜%s</figcaption></figure>%s</section>' %
+                        '<figure><img src="frames/%03d.png" alt="%s"><figcaption>%s〜%s%s</figcaption></figure>%s</section>' %
                         (i, i, esc(scene["title"]), esc(scene["telop"]), i, esc(scene["telop"]),
-                         timestamp(timing["start"]), timestamp(timing["end"]),
+                         timestamp(timing["start"]), timestamp(timing["end"]), " · " + esc(footage) if footage else "",
                          "".join("<p>%s</p>" % esc(c["text"]) for c in scene["narration"])))
         transcript += ["", "[%s] %s" % (timestamp(timing["start"]), scene["title"]), "要点: " + scene["telop"]]
+        transcript += ["映像: " + footage] if footage else []
         transcript += [cue["text"] for cue in scene["narration"]]
+    if recorded:
+        selection = ("<p>場面 %s は実際の画面の録画です。早送り・スローにした場面は、映像の上に倍率を表示しています。</p>"
+                     % "・".join(recorded)) + selection
     css = re.search(r"<style>(.*?)</style>", (SKILL / "assets/explanation.html").read_text(encoding="utf-8"), re.S).group(1)
     track = ('<track kind="captions" src="captions.vtt" srclang="ja" label="日本語" default>'
              if not args.burn_captions else "")
@@ -448,7 +566,7 @@ video { width:100%%; height:auto; background:#101d30; border-radius:12px }
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("story", type=Path, help="台本 JSON。画像・音声の相対パスはこのファイルを基準にする")
+    parser.add_argument("story", type=Path, help="台本 JSON。画像・録画・音声の相対パスはこのファイルを基準にする")
     parser.add_argument("--out", type=Path, required=True, help="新しく作る出力フォルダ（既存のフォルダは上書きしない）")
     parser.add_argument("--speech", choices=("auto", "none", "open-jtalk", "voicevox", "recorded"), default="auto",
                         help="既定 auto: VOICEVOX → Open JTalk → 無音の順で自動選択")
@@ -463,6 +581,7 @@ def main():
     parser.add_argument("--speed", type=float, default=1.05, help="読み上げ速度（0.5〜2.0、既定1.05）")
     parser.add_argument("--chrome", help="ヘッドレス Chrome の実行ファイル")
     parser.add_argument("--ffmpeg", default="ffmpeg")
+    parser.add_argument("--ffprobe", default="ffprobe", help="録画の場面の大きさと長さを読む ffprobe")
     parser.add_argument("--burn-captions", action="store_true", help="全文字幕を動画の下部に焼き込む（既定は切替式）")
     parser.add_argument("--font", default="sans-serif", help="焼き込み字幕のフォント名")
     args = parser.parse_args()
@@ -483,11 +602,23 @@ def main():
         if not shutil.which(args.ffmpeg):
             raise ValueError("FFmpeg が必要（--ffmpeg で指定できる）")
         args.ffmpeg = str(Path(shutil.which(args.ffmpeg)).resolve())
+        clips = [(i, s) for i, s in enumerate(story["scenes"], 1) if "video" in s]
+        if clips:
+            ffprobe = shutil.which(args.ffprobe) or shutil.which("ffprobe", path=str(Path(args.ffmpeg).parent))
+            if not ffprobe:
+                raise ValueError("録画の場面には ffprobe が必要（--ffprobe で指定できる）")
+            for i, scene in clips:
+                probe_clip(ffprobe, scene, i)
+        else:
+            print("注意: 録画の場面（video）が無い。動く機能・画面の説明なら、冒頭に機能の全体が分かる"
+                  "実際の操作の録画を置く（references/video.md の「冒頭のデモ」）", flush=True)
         chrome = browser(args.chrome)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".ve-video-", dir=args.out.parent) as folder:
             work = Path(folder)
             (work / "frames").mkdir()
+            for i, scene in clips:
+                clip_poster(args.ffmpeg, scene, i, work)
             # 台本・画像の不備を、音声の自動切り替えや Docker の準備より先に見つける。
             for i, scene in enumerate(story["scenes"], 1):
                 render_frame(chrome, scene, i, len(story["scenes"]), work)
