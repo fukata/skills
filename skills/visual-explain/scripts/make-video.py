@@ -213,7 +213,7 @@ img { width:1168px; height:378px; object-fit:contain }
     page.write_text('''<!doctype html><html lang="ja"><meta charset="utf-8">
 <style>
 * { box-sizing:border-box } body { margin:0; width:1280px; height:720px; background:#101d30;
- color:#f7faff; font-family:system-ui,sans-serif } header { display:flex; align-items:center; gap:24px }
+ color:#f7faff; font-family:"Hiragino Sans", "Hiragino Kaku Gothic ProN", "BIZ UDPGothic", "Yu Gothic UI", Meiryo, "Noto Sans JP", "Noto Sans CJK JP", sans-serif } header { display:flex; align-items:center; gap:24px }
 .count { color:#77e4cb; font-size:22px } h1 { margin:0; line-height:1.3; white-space:nowrap }
 .visual { margin:0 40px; overflow:hidden }
 .telop { margin:0 48px; display:flex; gap:20px; align-items:center }

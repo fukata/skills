@@ -998,7 +998,7 @@ def check_svgs(result, f, doc):
 FRAGMENT_PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src file: data:; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'">
 <style>
-body { margin: 0; font: 15px/1.7 system-ui, sans-serif; }
+body { margin: 0; font: 15px/1.7 "Hiragino Sans", "Hiragino Kaku Gothic ProN", "BIZ UDPGothic", "Yu Gothic UI", Meiryo, "Noto Sans JP", "Noto Sans CJK JP", sans-serif; }
 .ve-qa-a { width: 600px; padding: 12px 18px; overflow-wrap: anywhere; }
 .ve-qa-a svg { display: block; max-width: 100%; height: auto; margin: 8px 0; }
 .ve-qa-a svg:not([width]) { width: 100%; max-width: 720px; }

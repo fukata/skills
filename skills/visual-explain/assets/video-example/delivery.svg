@@ -2,7 +2,7 @@
 <title id="title">一つの台本から、説明動画、字幕ファイル、解説原稿を作る</title>
 <rect width="960" height="300" fill="#f7f9fc"/>
 <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#286caf"/></marker></defs>
-<g font-family="system-ui,sans-serif" fill="#203044" font-size="27" text-anchor="middle">
+<g font-family="'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'BIZ UDPGothic', 'Yu Gothic UI', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP', sans-serif" fill="#203044" font-size="27" text-anchor="middle">
 <text x="480" y="40" font-size="25">見る人に合わせて、動画でも文字でも確認できる</text>
 <rect x="30" y="120" width="220" height="95" rx="14" fill="#e8f1fb" stroke="#286caf" stroke-width="2"/>
 <text x="140" y="160">一つの台本</text><text x="140" y="192" font-size="21">図・要点・解説</text>

@@ -131,6 +131,8 @@ check "図のある節の日程の文章は警告しない"       "! $C '$TMP/fl
 mut flowone  '</main>' '<section><h2>失敗したとき</h2><p>2026-10-07 03:17 に確認した。14日間のお試しの後、4・7日 13:35 に決済する。</p></section></main>'
 check "日時は 1 時点、「14日間」は数えない"        "! $C '$TMP/flowone/explanation.html' --repo '$TMP/git' --no-browser | grep -q '\[text-flow\]'"
 check "雛形は用語・文章の日程の検査を通る"       "! $C '$HERE/../assets/explanation.html' --no-browser | grep -E '\[(term|text-flow)\]'"
+# 実際の事故: system-ui, sans-serif に任せていたため、Linux で日本語が中国語のフォントの字形で見えていた
+check "雛形・質問欄・動画のページはフォントを system-ui に任せない" "! grep -rnE 'font(-family)?[:=] *\"?system-ui' '$HERE/../assets' '$HERE/../scripts'"
 check "--ignore-ref で別リポジトリの参照を除く" "$C '$TMP/refmiss/explanation.html' --repo '$TMP/git' --no-browser --ignore-ref app/models/plans.rb | grep -q 'errors=0'"
 
 echo "== 回答の断片（--fragment）"

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-labelledby="title">
 <title id="title">文ごとの音声と字幕が同時に始まり、解説を終えてから場面が変わる</title>
 <rect width="960" height="300" fill="#f7f9fc"/>
-<g font-family="system-ui,sans-serif" fill="#203044" font-size="24">
+<g font-family="'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'BIZ UDPGothic', 'Yu Gothic UI', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP', sans-serif" fill="#203044" font-size="24">
 <text x="480" y="40" text-anchor="middle" font-size="25">音声を基準に、字幕と場面をそろえる</text>
 <text x="35" y="109">音声</text><text x="35" y="179">字幕</text><text x="35" y="249">図と要点</text>
 <rect x="180" y="70" width="265" height="54" rx="10" fill="#e8f1fb"/>

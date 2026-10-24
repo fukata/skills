@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-labelledby="title">
 <title id="title">図で関係を見せ、テロップで要点、音声と字幕で解説を伝える</title>
 <rect width="960" height="300" fill="#f7f9fc"/>
-<g font-family="system-ui,sans-serif" text-anchor="middle">
+<g font-family="'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'BIZ UDPGothic', 'Yu Gothic UI', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP', sans-serif" text-anchor="middle">
 <text x="480" y="48" font-size="26" fill="#203044">見る場所と、理解の手がかりをそろえる</text>
 <g stroke-width="2"><rect x="25" y="88" width="280" height="152" rx="16" fill="#e8f1fb" stroke="#286caf"/>
 <rect x="340" y="88" width="280" height="152" rx="16" fill="#e6f7f1" stroke="#24846e"/>
