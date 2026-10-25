@@ -56,7 +56,10 @@ function systemDefaultSnapshotPath() {
 }
 
 /**
- * @returns {Promise<{accountIds: string[], activeId: string|null, emails: Object<string, string>}>}
+ * @returns {Promise<{accountIds: string[], activeId: string|null, emails: Object<string, string>,
+ *   identities: Object<string, string>, needsSignIn: string[], systemDefaultAccount: string|null}>}
+ *   systemDefaultAccount は、System Default で動く claude をどのアカウントとして扱うか
+ *   （SYSTEM_DEFAULT_KEY、同じ認証先の管理アカウント、退避した認証情報が読めなければ null）
  */
 async function listClaudeAccounts(client, { snapshotPath = systemDefaultSnapshotPath() } = {}) {
   // refreshUsage: false — 使用量は判定に使わない。取得側がレート制限に掛かっていると待たされるだけになる
@@ -71,8 +74,9 @@ async function listClaudeAccounts(client, { snapshotPath = systemDefaultSnapshot
   const accountIds = accounts.map((account) => account.id);
   const emails = Object.fromEntries(accounts.map((account) => [account.id, account.email]));
   // 同じメールでも Team と個人の組織が異なれば別の利用枠。組織まで一致するときだけ重複を除く。
-  if (systemDefault && !accounts.some((account) =>
-    account.email === systemDefault.email && account.organizationUuid === systemDefault.organizationUuid)) {
+  const sameAsSystemDefault = systemDefault && accounts.find((account) =>
+    account.email === systemDefault.email && account.organizationUuid === systemDefault.organizationUuid);
+  if (systemDefault && !sameAsSystemDefault) {
     accountIds.push(SYSTEM_DEFAULT_KEY);
     emails[SYSTEM_DEFAULT_KEY] = `${systemDefault.email} (system default)`;
   }
@@ -88,12 +92,16 @@ async function listClaudeAccounts(client, { snapshotPath = systemDefaultSnapshot
     identities,
     accountIds,
     activeId: claude.activeAccountId ?? null,
-    emails
+    emails,
+    // Orca は、アカウントのフォルダのログインが読めないものに needsSignIn を付ける。選んでも Orca が断る
+    needsSignIn: accounts.filter((account) => account.needsSignIn).map((account) => account.id),
+    systemDefaultAccount: sameAsSystemDefault ? sameAsSystemDefault.id : systemDefault ? SYSTEM_DEFAULT_KEY : null
   };
 }
 
 /**
- * アクティブな Claude アカウントを切り替える。
+ * Orca の選択中の Claude アカウントを切り替える。Orca 1.4.240 では、選択を保存し、選択中のフォルダの場所を
+ * 書いたファイル（claude-profiles/selected-host）を書き換えるだけで、動いている claude のアカウントは変わらない。
  * accounts.selectClaude は orca CLI に無い内部 RPC（Orca 1.4.220 で確認。モバイルアプリのアカウント切替が使う）。
  * Orca の更新で名前や引数が変わると、ここが失敗する。
  */

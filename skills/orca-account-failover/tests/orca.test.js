@@ -7,7 +7,12 @@ const path = require('node:path');
 const { listClaudeAccounts, selectClaudeAccount } = require('../lib/orca.js');
 const { SYSTEM_DEFAULT_KEY, decide } = require('../lib/decide.js');
 
-function fixture(t, snapshot) {
+const ACCOUNTS = [
+  { id: 'team', email: 'user@example.test', organizationUuid: 'team-org', createdAt: 2 },
+  { id: 'other', email: 'other@example.test', organizationUuid: 'other-org', createdAt: 1 }
+];
+
+function fixture(t, snapshot, accounts = ACCOUNTS) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'failover-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const snapshotPath = path.join(dir, 'snapshot.json');
@@ -15,10 +20,7 @@ function fixture(t, snapshot) {
   const calls = [];
   const client = { async call(method, params) {
     calls.push({ method, params });
-    return { result: { claude: { activeAccountId: 'team', accounts: [
-      { id: 'team', email: 'user@example.test', organizationUuid: 'team-org', createdAt: 2 },
-      { id: 'other', email: 'other@example.test', organizationUuid: 'other-org', createdAt: 1 }
-    ] } } };
+    return { result: { claude: { activeAccountId: 'team', accounts } } };
   } };
   return { client, snapshotPath, calls };
 }
@@ -32,23 +34,36 @@ test('同じメールの個人組織を追加し、管理アカウントが上�
   const accounts = await listClaudeAccounts(f.client, f);
   assert.deepEqual(accounts.accountIds, ['other', 'team', SYSTEM_DEFAULT_KEY]);
   assert.match(accounts.emails[SYSTEM_DEFAULT_KEY], /system default/);
+  assert.equal(accounts.systemDefaultAccount, SYSTEM_DEFAULT_KEY);
   const now = 10000;
-  const state = { active: { key: 'team', since: 1 }, limited: { other: { until: 20000 } } };
-  const result = decide({ ...accounts, state, now, processStartedAt: 2, sessionId: 's', limitUntil: 20000 });
+  const state = { limited: { other: { until: 20000 } } };
+  const result = decide({ ...accounts, failedKey: 'team', state, now, sessionId: 's', limitUntil: 20000 });
   assert.equal(result.action, 'switch');
   assert.equal(result.target, SYSTEM_DEFAULT_KEY);
-  const exhausted = decide({ ...accounts, activeId: null, state: result.state,
-    now: now + 2, processStartedAt: now + 1, sessionId: 's', limitUntil: 20000 });
+  const exhausted = decide({ ...accounts, failedKey: SYSTEM_DEFAULT_KEY, state: result.state,
+    now: now + 2, sessionId: 's', limitUntil: 20000 });
   assert.equal(exhausted.reason, 'no-available-account');
-  const recovered = decide({ ...accounts, state: { ...state,
+  const recovered = decide({ ...accounts, failedKey: 'team', state: { ...state,
     limited: { other: { until: 20000 }, [SYSTEM_DEFAULT_KEY]: { until: now } } },
-    now, processStartedAt: 2, sessionId: 's', limitUntil: 20000 });
+    now, sessionId: 's', limitUntil: 20000 });
   assert.equal(recovered.target, SYSTEM_DEFAULT_KEY);
 });
 
-test('同じメール・組織の管理アカウントと重複させない', async (t) => {
+test('同じメール・組織の管理アカウントと重複させず、System Default はその管理アカウントとして扱う', async (t) => {
   const f = fixture(t, snapshot('team-org'));
-  assert.deepEqual((await listClaudeAccounts(f.client, f)).accountIds, ['other', 'team']);
+  const accounts = await listClaudeAccounts(f.client, f);
+  assert.deepEqual(accounts.accountIds, ['other', 'team']);
+  assert.equal(accounts.systemDefaultAccount, 'team');
+});
+
+test('System Default の認証情報が読めなければ、System Default を何として扱うかは分からない（null）', async (t) => {
+  const f = fixture(t);
+  assert.equal((await listClaudeAccounts(f.client, f)).systemDefaultAccount, null);
+});
+
+test('再ログインが要るアカウントを needsSignIn に挙げる', async (t) => {
+  const f = fixture(t, undefined, [ACCOUNTS[0], { ...ACCOUNTS[1], needsSignIn: true }]);
+  assert.deepEqual((await listClaudeAccounts(f.client, f)).needsSignIn, ['other']);
 });
 
 for (const [name, value] of [['未保存', undefined], ['破損', '{'], ['空', '{}'],

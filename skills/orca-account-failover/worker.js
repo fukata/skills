@@ -3,11 +3,14 @@
 //
 // hook.sh（Claude Code の StopFailure hook）から、セッションごとに切り離して起動される。流れ:
 //   1. 止まった理由が利用上限であることを確かめる（一時的な 429 では何もしない）
-//   2. 必要なら Orca のアクティブな Claude アカウントを次のアカウントへ切り替える（lib/decide.js）
-//   3. 止まった claude を終了させ、同じ Orca 端末で `claude --resume <session-id>` を打ち直す
+//   2. 止まった claude の設定フォルダ（CLAUDE_CONFIG_DIR）から上限に達したアカウントを特定し、
+//      上限でない別のアカウントを選ぶ（lib/profiles.js、lib/decide.js）。Orca の選択もそのアカウントに変える
+//   3. 止まった claude を終了させ、同じ Orca 端末で、選んだアカウントのフォルダで `claude --resume <session-id>` を打ち直す
 //
-// Orca の切替はホスト全体の認証情報（~/.claude/.credentials.json）を書き換える。切り替えるのは最初に
-// 止まった 1 セッションだけで、残りのセッションは各自が止まった時点でここへ来て、再開だけを行う。
+// Orca は端末ごとに、端末を開いた時点の選択のアカウントのフォルダを CLAUDE_CONFIG_DIR で渡す。Orca の選択を
+// 変えても動いている claude のアカウントは変わらず、次に起動する claude だけが変わる。そのため再開では、
+// 選んだアカウントのフォルダを resume.sh に明示して起動する。Orca の選択を変えるのは、この後に人が端末で
+// 起動し直す claude や新しく開く端末も、上限でないアカウントで動かすため（失敗しても再開は続ける）。
 //
 // 状態ディレクトリ: $ORCA_ACCOUNT_FAILOVER_STATE_DIR（既定は ~/.local/state/orca-account-failover。hook.sh が決める）
 // 止めたいとき: 状態ディレクトリに disabled という名前のファイルを置く（hook.sh が何もせず戻る）。
@@ -15,11 +18,13 @@
 // 試すとき: ORCA_ACCOUNT_FAILOVER_DRY_RUN=1 で、判定を記録するだけで切替も再開も行わない。
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const { SYSTEM_DEFAULT_KEY, parseLimitMessage, limitUntil, carryOverArgs, isPrintMode, decide } = require('./lib/decide.js');
 const { createClient, listClaudeAccounts, selectClaudeAccount, runOrcaCli } = require('./lib/orca.js');
+const { failedAccountKey, launchHome } = require('./lib/profiles.js');
 
 const STATE_DIR = process.env.ORCA_ACCOUNT_FAILOVER_STATE_DIR;
 const DRY_RUN = process.env.ORCA_ACCOUNT_FAILOVER_DRY_RUN === '1';
@@ -119,46 +124,32 @@ function readProcFile(pid, name) {
 }
 
 /**
- * 終了させてよい claude プロセスかを確かめ、起動引数と起動時刻を返す。
+ * 終了させてよい claude プロセスかを確かめ、起動引数と環境変数を返す。
  * 再開コマンドを打ち込む端末（handle）で動いている claude だけを対象にする。別の端末の claude を
  * 止めると、そのセッションは止まったまま、無関係な端末に再開コマンドが打たれる。
  */
-function inspectClaudeProcess(pid, handle, now) {
+function inspectClaudeProcess(pid, handle) {
   if (!Number.isInteger(pid) || pid <= 1) {
     throw new Skip('claude-pid-unknown');
   }
   if (readProcFile(pid, 'comm')?.trim() !== 'claude') {
     throw new Skip('not-a-claude-process');
   }
-  const environ = readProcFile(pid, 'environ')?.split('\0') ?? [];
-  if (!environ.includes(`ORCA_TERMINAL_HANDLE=${handle}`)) {
+  const env = {};
+  for (const entry of readProcFile(pid, 'environ')?.split('\0') ?? []) {
+    const separator = entry.indexOf('=');
+    if (separator > 0) {
+      env[entry.slice(0, separator)] = entry.slice(separator + 1);
+    }
+  }
+  if (env.ORCA_TERMINAL_HANDLE !== handle) {
     throw new Skip('claude-not-in-this-terminal');
   }
   const args = (readProcFile(pid, 'cmdline') ?? '').split('\0').slice(1);
   if (args.at(-1) === '') {
     args.pop();
   }
-  const elapsedMs = processElapsedMs(pid);
-  if (elapsedMs === null) {
-    throw new Skip('claude-start-time-unknown');
-  }
-  return { pid, args, startedAt: now - elapsedMs };
-}
-
-/**
- * プロセスが起動してからの経過時間。ps の etimes は秒に切り捨てるため、切替直後に再開したプロセスの
- * 前後関係を取り違える。/proc の起動時刻（起動からの tick 数）で求める
- */
-function processElapsedMs(pid) {
-  const stat = readProcFile(pid, 'stat');
-  const uptimeSeconds = Number(fs.readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
-  const ticksPerSecond = Number(spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).stdout);
-  if (!stat || !Number.isFinite(uptimeSeconds) || !(ticksPerSecond > 0)) {
-    return null;
-  }
-  // comm は括弧や空白を含みうるので、最後の ')' より後ろを数える。starttime は全体の 22 番目
-  const startTicks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]);
-  return Number.isFinite(startTicks) ? (uptimeSeconds - startTicks / ticksPerSecond) * 1000 : null;
+  return { pid, args, env };
 }
 
 function isAlive(pid) {
@@ -253,7 +244,10 @@ function isResumed(sessionId) {
   return found.status === 0;
 }
 
-async function restartSession({ claude, handle, sessionId, context }) {
+/**
+ * @param {string} home 再開する claude の CLAUDE_CONFIG_DIR。System Default なら ''
+ */
+async function restartSession({ claude, handle, sessionId, home, context }) {
   const resumeDir = path.join(STATE_DIR, 'resume');
   fs.mkdirSync(resumeDir, { recursive: true });
   const argsFile = path.join(resumeDir, `${sessionId}.args`);
@@ -262,14 +256,14 @@ async function restartSession({ claude, handle, sessionId, context }) {
   fs.writeFileSync(argsFile, resumeArgs.map((arg) => `${arg}\0`).join(''));
 
   // ロック待ちの間に元のプロセスが終わり、PID が別のプロセスへ再利用されていないかを確かめ直す
-  inspectClaudeProcess(claude.pid, handle, Date.now());
+  inspectClaudeProcess(claude.pid, handle);
   process.kill(claude.pid, 'SIGTERM');
   if (!(await waitFor(() => !isAlive(claude.pid), EXIT_WAIT_MS, EXIT_POLL_MS))) {
     throw new Error(`claude (pid ${claude.pid}) did not exit after SIGTERM`);
   }
   await sleep(SHELL_SETTLE_MS);
 
-  const command = `bash ${shellQuote(RESUME_SCRIPT)} ${shellQuote(argsFile)}`;
+  const command = `bash ${shellQuote(RESUME_SCRIPT)} ${shellQuote(argsFile)} ${shellQuote(home)}`;
   const sent = runOrcaCli(['terminal', 'send', '--terminal', handle, '--text', command, '--enter', '--json']);
   if (!sent.ok) {
     throw new Error(`orca terminal send failed: ${(sent.stderr || sent.stdout).trim().slice(0, 500)}`);
@@ -299,26 +293,47 @@ async function main() {
     if (!handle) {
       throw new Skip('not-in-orca-terminal');
     }
-    const claude = inspectClaudeProcess(claudePid, handle, now);
+    const claude = inspectClaudeProcess(claudePid, handle);
     if (isPrintMode(claude.args)) {
       throw new Skip('print-mode');
     }
+    // Orca が端末に渡す、選択中のフォルダの場所を書いたファイル（<データフォルダ>/claude-profiles/selected-host）。
+    // 無ければ、アカウントごとの設定フォルダを使わない Orca か、Orca の管理外で起動した claude
+    const pointer = claude.env.ORCA_CLAUDE_PROFILE_POINTER;
+    if (!pointer || !path.isAbsolute(pointer)) {
+      throw new Skip('no-claude-profiles');
+    }
+    const profilesRoot = path.dirname(pointer);
     const until = limitUntil(limit, now);
 
     const client = createClient();
     const decision = await withLock(async () => {
       const accounts = await listClaudeAccounts(client);
+      const failedKey = failedAccountKey({
+        configDir: claude.env.CLAUDE_CONFIG_DIR,
+        userConfigDir: claude.env.ORCA_CLAUDE_USER_CONFIG_DIR,
+        homeDir: os.homedir(),
+        profilesRoot,
+        systemDefaultAccount: accounts.systemDefaultAccount
+      });
+      if (failedKey === null) {
+        // 利用者が自分で指定したフォルダなど。どのアカウントの上限か分からない
+        throw new Skip('unknown-config-dir');
+      }
+      const homes = Object.fromEntries(accounts.accountIds.map((key) =>
+        [key, launchHome({ key, profilesRoot, systemDefaultAccount: accounts.systemDefaultAccount })]));
+      const excluded = (key) => accounts.needsSignIn.includes(key) ? 'needs-sign-in' : homes[key] === null ? 'no-credentials' : null;
       const decided = decide({
         now: Date.now(),
         identities: accounts.identities,
         limitKind: limit.kind,
-        accountIds: accounts.accountIds,
-        activeId: accounts.activeId,
+        accountIds: accounts.accountIds.filter((key) => !excluded(key)),
+        failedKey,
         state: loadState(),
         sessionId,
-        processStartedAt: claude.startedAt,
         limitUntil: until.at
       });
+      const activeKey = accounts.activeId ?? SYSTEM_DEFAULT_KEY;
       log('decision', {
         ...context,
         action: decided.action,
@@ -326,37 +341,38 @@ async function main() {
         limit: limit.kind,
         limitUntil: new Date(until.at).toISOString(),
         resetParsed: until.parsed,
-        active: accounts.emails[accounts.activeId ?? SYSTEM_DEFAULT_KEY] ?? 'system default',
+        failed: accounts.emails[failedKey] ?? failedKey,
+        active: accounts.emails[activeKey] ?? 'system default',
         target: decided.target ? accounts.emails[decided.target] : undefined,
         probe: decided.state.probe,
         candidates: accounts.accountIds.map((key) => ({
           key, identity: accounts.identities[key],
           limited: decided.state.limited[key] ?? null,
           reason: key === decided.target ? decided.reason :
-            key === (accounts.activeId ?? SYSTEM_DEFAULT_KEY) ? 'active-account' :
-              decided.state.limited[key]?.until > Date.now() ? 'cached-limit' : 'available'
+            key === failedKey ? 'failed-account' :
+              excluded(key) ?? (decided.state.limited[key]?.until > Date.now() ? 'cached-limit' : 'available')
         }))
       });
       if (DRY_RUN) {
         return decided;
       }
-      if (decided.action === 'switch') {
-        if (decided.reason === 'stale-limit-probe') {
-          // RPC が失敗しても他の端末から同じ試行を繰り返さない。実際の切替成功までは active を進めない。
-          saveState({ ...decided.state, active: loadState().active ?? null,
-            probe: { ...decided.state.probe, pending: false } });
-        }
-        await selectClaudeAccount(client, decided.target);
-        log('switched', { ...context, to: accounts.emails[decided.target] });
-      }
       saveState(decided.state);
-      return decided;
+      if (decided.action === 'switch' && decided.target !== activeKey) {
+        try {
+          await selectClaudeAccount(client, decided.target);
+          log('switched', { ...context, to: accounts.emails[decided.target] });
+        } catch (err) {
+          // 再開は選んだフォルダで行うので、Orca の選択を変えられなくても続ける
+          log('error', { ...context, message: `accounts.selectClaude failed (resuming anyway): ${err?.message ?? err}` });
+        }
+      }
+      return { ...decided, home: homes[decided.target], to: accounts.emails[decided.target] };
     });
 
     if (DRY_RUN || decision.action === 'give-up') {
       return;
     }
-    await restartSession({ claude, handle, sessionId, context });
+    await restartSession({ claude, handle, sessionId, home: decision.home, context: { ...context, to: decision.to } });
   } catch (err) {
     if (err instanceof Skip) {
       log('skip', { ...context, reason: err.message });
