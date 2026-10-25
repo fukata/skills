@@ -174,8 +174,8 @@ function normalizeState(state, now) {
       sessions[id] = { ...entry };
     }
   }
-  return { active: state?.active ? { ...state.active } : null, limited, sessions,
-    identities: { ...state?.identities }, probe: state?.probe ? { ...state.probe } : null };
+  // 以前の版が持っていた Orca の選択の記録（active）は使わないので引き継がない
+  return { limited, sessions, identities: { ...state?.identities }, probe: state?.probe ? { ...state.probe } : null };
 }
 
 function isLimited(state, key, now) {
@@ -183,11 +183,16 @@ function isLimited(state, key, now) {
   return entry !== undefined && entry.until > now;
 }
 
-// 呼び出すのはアクティブが上限中と分かった後なので、アクティブ自身は候補から外れる
-function nextAvailableAccount(accountIds, activeId, state, now) {
-  const start = accountIds.indexOf(activeId ?? SYSTEM_DEFAULT_KEY) + 1;
+// 試している最中のアカウントは、記録上は上限中でも切替先にしてよい（使えるかを確かめている）
+function isAvailable(state, key, now) {
+  return !isLimited(state, key, now) || (state.probe?.key === key && state.probe.pending);
+}
+
+// 呼び出すのは止まったアカウントを上限と記録した後なので、そのアカウント自身は候補から外れる
+function nextAvailableAccount(accountIds, failedKey, state, now) {
+  const start = accountIds.indexOf(failedKey) + 1;
   const rotated = [...accountIds.slice(start), ...accountIds.slice(0, start)];
-  return rotated.find((id) => !isLimited(state, id, now)) ?? null;
+  return rotated.find((id) => id !== failedKey && isAvailable(state, id, now)) ?? null;
 }
 
 function recordResume(state, sessionId, now) {
@@ -202,32 +207,26 @@ function recordResume(state, sessionId, now) {
 /**
  * 利用上限で止まったセッションをどう扱うかを決める
  *
- * 失敗したのがどのアカウントの上限かは、エラーからは分からない。Orca の切替はホスト全体の認証情報を
- * 書き換えるので、切替より前から動いているプロセスは切替前のアカウントで失敗した可能性がある。
- * そこで「アクティブなアカウントは X だ」とこのツールが把握した時刻（state.active.since）より後に
- * 起動したプロセスの失敗だけを、X の上限として記録する。それより前から動いているプロセスは、
- * アカウントを上限扱いにせず再開だけする（本当に X が上限なら、再開後の失敗で確定する）。
- * 誤って上限扱いにすると、使えるアカウントから使えないアカウントへ切り替えてしまう。
+ * Orca は端末ごとに、アカウントの設定フォルダ（CLAUDE_CONFIG_DIR）を決めて claude に渡す。止まった claude が
+ * どのフォルダで動いていたかで、上限に達したアカウント（failedKey）は確定する。Orca の選択中のアカウントは、
+ * 次に起動する claude のアカウントでしかなく、動いている claude とは食い違うことがあるので判断に使わない。
  *
  * @param {object} input
  * @param {number} input.now
- * @param {string[]} input.accountIds 切替候補（復帰可能なら SYSTEM_DEFAULT_KEY も含む）。この順に回す
- * @param {string|null} input.activeId アクティブな管理アカウント。null は system default
+ * @param {string[]} input.accountIds 切替候補（再ログインが要るものは除いておく。復帰可能なら SYSTEM_DEFAULT_KEY も含む）。この順に回す
+ * @param {string} input.failedKey 止まった claude が使っていたアカウント
  * @param {object} input.state 前回までの記録（書き換えない）
  * @param {string} input.sessionId
- * @param {number} input.processStartedAt 止まった claude プロセスの起動時刻
  * @param {number} input.limitUntil 今回の上限が解ける時刻
- * @returns {{action: 'switch'|'resume'|'give-up', target?: string, reason: string, state: object}}
+ * @returns {{action: 'switch'|'give-up', target?: string, reason: string, state: object}}
  */
-function decide({ now, accountIds, activeId, identities = {}, state, sessionId, processStartedAt, limitUntil: until, limitKind }) {
+function decide({ now, accountIds, failedKey, identities = {}, state, sessionId, limitUntil: until, limitKind }) {
   const next = normalizeState(state, now);
-  const activeKey = activeId ?? SYSTEM_DEFAULT_KEY;
 
   // 旧形式の記録は組織を特定できないので保持し、古い記録の再試行で確認する。
   for (const [key, identity] of Object.entries(identities)) {
     if (next.identities[key] && next.identities[key] !== identity) {
       delete next.limited[key];
-      if (next.active?.key === key) next.active = null;
       if (next.probe?.key === key) next.probe.pending = false;
     }
     next.identities[key] = identity;
@@ -239,28 +238,14 @@ function decide({ now, accountIds, activeId, identities = {}, state, sessionId, 
     return { action: 'give-up', reason: 'resume-loop', state: next };
   }
 
-  let startedBeforeKnown = true;
-  if (!next.active || next.active.key !== activeKey) {
-    // 初回、または Orca の画面などこのツールの外で切り替えられた。いま動いているプロセスはすべて把握前のもの
-    next.active = { key: activeKey, since: now };
-  } else {
-    startedBeforeKnown = processStartedAt < next.active.since;
-  }
-  if (!startedBeforeKnown) {
-    next.limited[activeKey] = { at: now, until, ...(limitKind ? { kind: limitKind } : {}) };
-    if (next.probe?.key === activeKey) next.probe.pending = false;
-  }
+  next.limited[failedKey] = { at: now, until, ...(limitKind ? { kind: limitKind } : {}) };
+  if (next.probe?.key === failedKey) next.probe.pending = false;
 
-  if (!isLimited(next, activeKey, now) || (next.probe?.key === activeKey && next.probe.pending)) {
-    recordResume(next, sessionId, now);
-    return { action: 'resume', reason: 'started-before-active-known', state: next };
-  }
-
-  let target = nextAvailableAccount(accountIds, activeId, next, now);
+  let target = nextAvailableAccount(accountIds, failedKey, next, now);
   let probing = false;
   if (target === null && (!next.probe || now - next.probe.at >= PROBE_INTERVAL_MS)) {
     // 全候補が上限中のときだけ、確認が最も古い別アカウントを一つ試す。
-    target = accountIds.filter((key) => key !== activeKey &&
+    target = accountIds.filter((key) => key !== failedKey &&
       Number.isFinite(next.limited[key]?.at) && now - next.limited[key].at >= PROBE_INTERVAL_MS)
       .sort((a, b) => next.limited[a].at - next.limited[b].at)[0] ?? null;
     probing = target !== null;
@@ -269,9 +254,8 @@ function decide({ now, accountIds, activeId, identities = {}, state, sessionId, 
     return { action: 'give-up', reason: 'no-available-account', state: next };
   }
   if (probing) next.probe = { key: target, at: now, pending: true };
-  next.active = { key: target, since: now };
   recordResume(next, sessionId, now);
-  return { action: 'switch', target, reason: probing ? 'stale-limit-probe' : startedBeforeKnown ? 'active-known-limited' : 'active-limited', state: next };
+  return { action: 'switch', target, reason: probing ? 'stale-limit-probe' : 'limited', state: next };
 }
 
 module.exports = {

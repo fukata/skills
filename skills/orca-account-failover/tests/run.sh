@@ -5,8 +5,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fail=0
 
-echo "== 判定・System Default の候補追加と切替 RPC"
+echo "== 判定・設定フォルダとアカウントの対応・System Default の候補追加と切替 RPC"
 node --test "$HERE"/*.test.js || fail=1
+
+echo "== resume.sh"
+bash "$HERE/resume.test.sh" || fail=1
 
 echo "== setup.sh / teardown.sh"
 bash "$HERE/settings.test.sh" || fail=1
