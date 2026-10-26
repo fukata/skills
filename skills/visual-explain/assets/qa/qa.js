@@ -85,6 +85,9 @@
   var tools = el('div', { class: 've-qa-tools', hidden: true }, [exportBtn]);
   var askBox = el('section', { class: 've-qa-ask', hidden: true, 'aria-label': 'エージェントからの質問' });
   var askOthers = el('section', { class: 've-qa-ask-others', hidden: true, 'aria-label': 'ほかに答えを待っている質問' });
+  var askAlerts = el('section', { class: 've-qa-ask-alerts', hidden: true, 'aria-label': '質問が来たときの知らせ方' });
+  // 質問欄を閉じていても、ほかに答えを待っている質問に気づけて移れるよう、資料の上にも出す帯
+  var nextBar = el('div', { class: 've-qa-next', role: 'status', hidden: true });
   var form = el('form', { class: 've-qa-form' }, [
     replyBox,
     quoteBox,
@@ -97,14 +100,14 @@
   panel.append(
     el('div', { class: 've-qa-head' }, [el('h2', { text: '質問と回答' })].concat(headButtons)),
     agentNote,
-    askBox, askOthers, notice, empty, list, tools, form
+    askOthers, askBox, askAlerts, notice, empty, list, tools, form
   );
   var resizer = el('div', { class: 've-qa-resize', role: 'separator', 'aria-orientation': 'vertical', tabindex: '0',
     'aria-label': '質問欄の幅（ドラッグか ← → で変える。ダブルクリックで元に戻す）',
     title: 'ドラッグで幅を変える（ダブルクリックで元に戻す）' });
   if (!WIN) panel.insertBefore(resizer, panel.firstChild);
   var toast = el('div', { class: 've-qa-toast', role: 'status', hidden: true });
-  if (WIN) root.append(panel, toast); else root.append(toggle, panel, toast);
+  if (WIN) root.append(panel, toast); else root.append(nextBar, toggle, panel, toast);
   document.body.appendChild(root);
 
   // ---- 回答の HTML を、許可したタグ・属性だけにする
@@ -742,10 +745,10 @@
       postJson('answer', { doc: DOC, answers: answers })
         .then(function (x) {
           if (x.r.status === 200) {
-            var rest = pendingAsks.filter(function (p) { return p.doc !== DOC; }).length;
-            showToast(['答えを送りました。' + agentName(ask) + ' の作業が続きます。' + (rest ? 'ほかに ' + rest + ' 件が答えを待っています。' : '')]);
+            var sent = '答えを送りました。' + agentName(ask) + ' の作業が続きます。';
+            showToast([sent]);
             renderAsk(x.b);
-            refreshAsks();
+            refreshAsks(sent);
             return;
           }
           if (x.r.status === 401) auth = false;
@@ -759,7 +762,11 @@
       askSending = true;
       sendBtn.disabled = termBtn.disabled = true;
       postJson('ask-close', { doc: DOC, reason: 'terminal' })
-        .then(function (x) { if (x.r.status === 200) renderAsk(x.b); else err.textContent = x.b.error || ('送れませんでした（' + x.r.status + '）'); })
+        .then(function (x) {
+          if (x.r.status !== 200) { err.textContent = x.b.error || ('送れませんでした（' + x.r.status + '）'); return; }
+          renderAsk(x.b);
+          refreshAsks('');
+        })
         .catch(function () { err.textContent = '配信サーバーに接続できません。'; })
         .then(function () { askSending = false; sendBtn.disabled = termBtn.disabled = false; schedule(0); });
     });
@@ -768,11 +775,15 @@
 
   // ---- 答えを待っている質問の一覧・知らせ（質問の資料を開いているとき）
   // 質問の資料を開いている間も、受け箱と同じく配信サーバーとつないでおく（ページを見ている人がいる印になり、
-  // 質問が増えた・締め切られたら知らせが届く）。答えを待っている質問の件数をタイトルに付け、ほかの質問を一覧に出す。
+  // 質問が増えた・締め切られたら知らせが届く）。答えを待っている質問の件数をタイトルに付け、ほかの質問を
+  // 質問欄の上の一覧と、資料の上の帯に出す（質問欄を閉じていても移れるように）。
   // 新しい質問が来たら、デスクトップ通知（HTTPS のページで許可したとき）と音（有効にしたとき）で知らせ、
-  // いま開いている質問を答え終えていれば、次の質問の資料を開く
+  // いま開いている質問を答え終えていれば、次の質問の資料を開く。この資料で答えた（ターミナルで答えることにした）
+  // ときも、ほかに答えを待っている質問があれば、先に来たものの資料を開く（前からあった質問は「新しく来た」と
+  // みなされないので、開かないと一覧のリンクを探すしかなくなる）
 
-  var pendingAsks = [], knownAsks = null, askTimer = null;
+  var pendingAsks = [], knownAsks = null, askTimer = null, nextTimer = null;
+  var NEXT_DELAY = 1200;  // 答えを送った知らせを読めるよう、次の質問を開くまで少し待つ
 
   function docHref(doc) { return '/' + doc.split('/').map(encodeURIComponent).join('/'); }
 
@@ -786,7 +797,17 @@
       .filter(Boolean).join(' · ');
   }
 
-  function refreshAsks() {
+  function otherAsks() { return pendingAsks.filter(function (a) { return a.doc !== DOC; }); }
+
+  // ほかに答えを待っている質問のうち、先に来たもの（一覧は新しい順なので末尾）。締め切りが近い方から答えてもらう
+  function oldestOther() { var others = otherAsks(); return others[others.length - 1]; }
+
+  function shorten(text, max) { return text.length > max ? text.slice(0, max) + '…' : text; }
+
+  // done: この資料の質問に答えた（ターミナルで答えることにした）直後の取り直しなら、知らせの頭に付ける文（空でもよい）。
+  // ほかの質問があれば開く。配信サーバーからの知らせ（Event）やタイマーで呼ばれたときは文字列ではない
+  function refreshAsks(done) {
+    var openNext = typeof done === 'string', lead = openNext ? done : '';
     clearTimeout(askTimer);
     fetch(API + 'asks', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
@@ -799,29 +820,54 @@
         renderOthers();
         updateTitle();
         fresh.forEach(function (a) { alertAsk(a); });
-        var next = pendingAsks.filter(function (a) { return a.doc !== DOC; })[0];
-        if (next && fresh.length && autoOpen() && ask && askState(ask) !== 'waiting') { location.href = docHref(next.doc); return; }
+        var finished = ask && askState(ask) !== 'waiting';
+        // 新しく来た質問は新しい方から、答え終えた後は先に来た方から開く
+        var next = fresh.length ? otherAsks()[0] : openNext ? oldestOther() : null;
+        if (next && finished && autoOpen()) {
+          if (!fresh.length) {
+            showToast([lead + 'ほかに答えを待っている質問を開きます。']);
+            clearTimeout(nextTimer);
+            nextTimer = setTimeout(function () { location.href = docHref(next.doc); }, NEXT_DELAY);
+            return;
+          }
+          location.href = docHref(next.doc);
+          return;
+        }
         if (fresh.length) showToast([agentName(fresh[0]) + ' から次の質問が来ました。', el('a', { href: docHref(fresh[0].doc), class: 've-qa-link', text: '開く' })]);
+        else if (next) showToast([lead + 'ほかに ' + otherAsks().length + ' 件が答えを待っています。', el('a', { href: docHref(next.doc), class: 've-qa-link', text: '先に来た質問を開く' })]);
       })
       .catch(function () { /* 次の知らせで取り直す */ })
       .then(function () { askTimer = setTimeout(refreshAsks, 15000); });  // 締め切り・フックが止まったことを表示に出すため
   }
 
   function renderOthers() {
-    var others = pendingAsks.filter(function (a) { return a.doc !== DOC; });
+    var others = otherAsks();
     askOthers.textContent = '';
-    askOthers.hidden = !ask;
+    askOthers.hidden = !ask || !others.length;
+    askAlerts.textContent = '';
+    askAlerts.hidden = !ask;
+    renderNextBar(others);
     if (!ask) return;
-    if (others.length) {
-      askOthers.appendChild(el('p', { class: 've-qa-ask-others-title', text: 'ほかに答えを待っている質問 ' + others.length + ' 件' }));
-      var ul = el('ul');
-      others.forEach(function (a) {
-        ul.appendChild(el('li', {}, [el('a', { href: docHref(a.doc), text: a.question.length > 60 ? a.question.slice(0, 60) + '…' : a.question }),
-          el('span', { class: 've-qa-meta', text: ' ' + sessionLabel(a) })]));
-      });
-      askOthers.appendChild(ul);
-    }
-    askOthers.appendChild(alertControls());
+    askAlerts.appendChild(alertControls());
+    if (!others.length) return;
+    askOthers.appendChild(el('p', { class: 've-qa-ask-others-title', text: 'ほかに答えを待っている質問 ' + others.length + ' 件' }));
+    var ul = el('ul');
+    others.forEach(function (a) {
+      ul.appendChild(el('li', {}, [el('a', { href: docHref(a.doc), text: shorten(a.question, 60) }),
+        el('span', { class: 've-qa-meta', text: ' ' + sessionLabel(a) })]));
+    });
+    askOthers.appendChild(ul);
+  }
+
+  // 資料の上の帯: 件数と、先に来た質問へのリンク。2 件以上なら受け箱へのリンクも添える
+  function renderNextBar(others) {
+    nextBar.textContent = '';
+    nextBar.hidden = !ask || !others.length;
+    if (nextBar.hidden) return;
+    var first = oldestOther();
+    nextBar.append(el('strong', { text: 'ほかに答えを待っている質問 ' + others.length + ' 件' }), ' ',
+      el('a', { href: docHref(first.doc), class: 've-qa-next-open', text: shorten(first.question, 40) + ' を開く' }));
+    if (others.length > 1) nextBar.append(' ', el('a', { href: API + 'inbox', text: '受け箱' }));
   }
 
   // 知らせ方: デスクトップ通知は HTTPS（または localhost）のページで許可したときだけ使える。音は一度押して有効にする
