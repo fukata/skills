@@ -113,15 +113,22 @@ body.ve-qa-open .ve-qa-toggle { display: none; }
 .ve-qa-ask-answers { display: grid; grid-template-columns: minmax(5em, max-content) 1fr; gap: 2px 12px; margin: 8px 0 0; font-size: .9rem; }
 .ve-qa-ask-answers dt { font-weight: 700; }
 .ve-qa-ask-answers dd { margin: 0; }
-/* ほかに答えを待っている質問と、知らせ方の切り替え */
-.ve-qa-ask-others { margin: 8px 18px 0; padding: 8px 12px; border: 1px solid var(--qa-line); border-radius: 8px;
+/* ほかに答えを待っている質問（質問欄の上）と、知らせ方の切り替え（質問の下） */
+.ve-qa-ask-others { margin: 10px 18px 0; padding: 8px 12px; border: 1px solid var(--qa-line); border-radius: 8px;
                     background: var(--qa-warn-bg); font-size: .85rem; }
-.ve-qa-ask-others[hidden] { display: none; }
+.ve-qa-ask-others[hidden], .ve-qa-ask-alerts[hidden] { display: none; }
 .ve-qa-ask-others-title { margin: 0 0 4px; font-weight: 700; color: var(--qa-warn); }
-.ve-qa-ask-others ul { margin: 0 0 6px; padding-left: 1.2em; }
+.ve-qa-ask-others ul { margin: 0; padding-left: 1.2em; }
 .ve-qa-ask-others li { margin: 2px 0; }
+.ve-qa-ask-alerts { margin: 8px 18px 0; padding: 0 12px; border: 1px solid var(--qa-line); border-radius: 8px; background: var(--qa-soft); }
 .ve-qa-alerts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0; color: var(--qa-muted); font-size: .85rem; }
-.ve-qa-ask-others:not(:has(.ve-qa-ask-others-title)) { background: var(--qa-soft); }
+/* 資料の上の帯。質問欄（z-index がひとつ上）を閉じていても見え、狭い画面で質問欄を開くと下に隠れる */
+.ve-qa-next { position: fixed; top: 12px; left: 12px; z-index: 2147483000; max-width: min(560px, calc(100vw - 24px));
+              padding: 8px 14px; border: 1px solid #e3b56b; border-radius: 10px; background: var(--qa-warn-bg);
+              box-shadow: 0 4px 16px rgba(20, 40, 70, .2); font-size: .9rem; }
+.ve-qa-next[hidden] { display: none; }
+.ve-qa-next strong { color: var(--qa-warn); }
+.ve-qa-next a { color: var(--qa-key); font-weight: 700; }
 /* 受け箱（/__qa/inbox） */
 body.ve-qa-inbox-page { margin: 0; background: #f3f5f8; }
 .ve-qa-inbox { max-width: 760px; margin: auto; padding: 32px 20px; }

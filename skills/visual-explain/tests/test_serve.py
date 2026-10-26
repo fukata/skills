@@ -1728,6 +1728,10 @@ class AskTest(ServeTestBase):
         self.assertIn("A  B\n1  2", root)
         self.assertRegex(out, r'<aside id="ve-qa-panel"[^>]*>')  # 質問が来たら質問欄を開く
         self.assertNotRegex(out, r'<aside id="ve-qa-panel"[^>]*hidden')
+        # ほかに答えを待っている質問が無ければ、資料の上の帯も質問欄の上の一覧も出さない
+        self.assertRegex(root, r'<div class="ve-qa-next"[^>]*hidden')
+        self.assertRegex(root, r'<section class="ve-qa-ask-others"[^>]*hidden')
+        self.assertNotRegex(root, r"ほかに答えを待っている質問 \d+ 件")
         self.answer(reg["doc"], self.good())
         out = self.dump(reg["doc"])
         root = out[out.index('id="ve-qa-root"'):]
@@ -1756,11 +1760,16 @@ class AskTest(ServeTestBase):
         _, first = self.register(build="never")
         q = json.loads(json.dumps(QUESTIONS))
         q[0]["question"] = "別のセッションの質問"
-        self.register(q, build="never", session_id="other-session")
+        _, other = self.register(q, build="never", session_id="other-session")
         out = self.dump(first["doc"])
         root = out[out.index('id="ve-qa-root"'):]
-        self.assertIn("ほかに答えを待っている質問 1 件", root)
+        # 質問欄の上の一覧と、質問欄を閉じていても見える資料の上の帯の両方に出す
+        self.assertEqual(root.count("ほかに答えを待っている質問 1 件"), 2)
         self.assertIn("別のセッションの質問", root)
+        self.assertNotRegex(root, r'<div class="ve-qa-next"[^>]*hidden')
+        self.assertRegex(root, r'<a href="/%s/[^"]*" class="ve-qa-next-open"' % re.escape(other["doc"].split("/")[0]))
+        # 一覧は答えを待っている質問の上に置く（質問の欄が長くてもスクロールせずに見える）
+        self.assertLess(root.index('class="ve-qa-ask-others"'), root.index('class="ve-qa-ask"'))
         self.assertIn("音で知らせる", root)
         self.assertIn("デスクトップ通知", root)  # 127.0.0.1 は安全な配信元なので、デスクトップ通知の切り替えが出る
         self.assertRegex(out, r"<title>\(2\) ")  # 答えを待っている質問の件数
