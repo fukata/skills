@@ -2544,7 +2544,7 @@ def serve_main(args):
     limit = "上限 %d 分で自動停止" % (args.max_time // 60) if args.max_time else "上限なし"
     print("配信中: %s/ （フォルダ: %s、%s、PID %d）" % (base, cfg.root, limit, os.getpid()))
     for rel in find_docs(cfg):
-        print("資料: %s/%s?k=%s" % (base, rel, cfg.token))
+        print("資料URL: %s/%s?k=%s" % (base, rel, cfg.token))
     if app.qa_enabled:
         names = "、".join("%s（%s）" % (a.label, shlex.join(a.argv)) for a in app.agents.values() if a.available())
         print("質問: 受け付ける（資料を作ったエージェントが答える。使えるもの: %s。資料を作ったセッションが分からないとき: %s。"

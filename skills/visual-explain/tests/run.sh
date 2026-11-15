@@ -113,6 +113,24 @@ mut askshort '<dt>判断の軸</dt><dd>集計の早さを取るか、更新の�
 check "'askshort' は --ask で [ask-background] のエラー" "out=\$($C '$TMP/askshort/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-background\].*判断の軸.*短すぎる' <<<\"\$out\""
 mut asknone '<dd>更新は毎月1日のまま変えない。</dd>' '<dd>無し</dd>'
 check "「決まっていること」が「無し」なら通る" "$C '$TMP/asknone/explanation.html' --ask --repo '$TMP/git' --no-browser | grep -q 'errors=0'"
+mkdir -p "$TMP/nofig" && cp -R "$HERE/fixtures/valid/." "$TMP/nofig/"
+python3 - "$TMP/nofig/explanation.html" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+open(p, "w", encoding="utf-8").write(re.sub(r"<figure\b.*?</figure\s*>", "", s, flags=re.S))
+PY
+check "図の無い質問資料は [ask-figure] のエラー" "out=\$($C '$TMP/nofig/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-figure\]' <<<\"\$out\""
+mkdir -p "$TMP/askcard" && cp -R "$HERE/fixtures/valid/." "$TMP/askcard/"
+python3 - "$TMP/askcard/explanation.html" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+s = s.replace("    </ul>\n  </section>\n</main>",
+              '    </ul>\n    <article class="card" id="option-1"><h3>案A</h3><p>説明</p></article>\n  </section>\n</main>', 1)
+open(p, "w", encoding="utf-8").write(s)
+PY
+check "カードの節に図が無いと [ask-figure] の警告" "out=\$($C '$TMP/askcard/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 0 ] && grep -q 'WARN  \[ask-figure\]' <<<\"\$out\""
 check "見出しが「背景」の節も前提とみなす"      "! $C '$TMP/bgctx/explanation.html' --repo '$TMP/git' --no-browser | grep -q 'WARN  \[context\]'"
 check "素のディレクトリでも識別子の欠けを拾う" "$C '$TMP/ident/explanation.html' --repo '$TMP/plain' --no-browser | grep -q 'WARN  \[identifier\]'"
 check "'term' は略語とチケット番号を 1 件ずつ出す" "out=\$($C '$TMP/term/explanation.html' --repo '$TMP/git' --no-browser); grep -q '「PdM」' <<<\"\$out\" && grep -q '「PAY-123」' <<<\"\$out\""

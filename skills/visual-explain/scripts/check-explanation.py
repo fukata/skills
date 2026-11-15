@@ -19,6 +19,7 @@
   - [ブラウザ] 狭い幅でページ全体が横にはみ出す
   - [ブラウザ] 印刷（A4 縦）でページが横にはみ出す / スクロール・高さの制限で枠の中が切れる
   - 本文に Markdown の記法（**太字**、`コード`、[リンク](URL)、# 見出し）が残っている
+  - 質問の資料（--ask）に図が1枚も無い
 警告:
   - コード参照と隣り合って書いた識別子が、参照した行（前後2行と、囲む def / task 等の行を含む）に無い
   - 本文の識別子（クラス名・snake_case の名前など）がリポジトリに見当たらない
@@ -34,6 +35,8 @@
   - 略語・チケット番号・クラス名（PdM、ABC-123、QuoteService など）の意味が、前提の節・用語の一覧
     （dt / dd）・出てくる所の括弧のどこにも無い（事前知識の無い人には分からない。根拠などの節は除く）
   - 図のある節に要点（class="key"）が無い（重要な所と補足の見分けが付かない）
+  - 質問の資料（--ask）で、選択肢のカード（article.card#option-*）を置く節に図が無い
+    （案を比較する図を別の節に置き、カードの節からは指すだけにしている）
   - 会話を指す言葉（「さっき」「先ほど」「ご質問の」など）がある（資料だけを渡された人には指す先が無い）
   - [ブラウザ] SVG の文字同士が重なる / 文字が枠の線にかかる / 文字と枠の左右の余白が 2 未満
   - [ブラウザ] 1 つの箱に 3 行または 60 文字を超える文字がある（図の形をした表になっている）
@@ -50,7 +53,8 @@ serve.py export が書き出した「読者からの質問と回答」の節（<
 --ask: AskUserQuestion（request_user_input）の質問の資料として検査する。前提の節に、質問の背景の一覧
 （<dl class="terms background">）を置き、見出し（dt）が「作業」「聞く理由」「決まっていること」「判断の軸」
 「答えた後」で始まる項目をそろえる。欠けていればエラー。各項目の中身（dd）が空、または短すぎてもエラー
-（「決まっていること」の「無し」は除く）。選択肢だけでは、なぜ聞かれているのか分からないため。
+（「決まっていること」の「無し」は除く）。資料に図が1枚も無ければエラー。選択肢のカードを置く節に図が
+無ければ警告（別の節の図を指すだけにしない）。選択肢だけでは、なぜ聞かれているのか分からないため。
 
 --inventory の書式: 1 行に 1 要素。「名前 | 別名 | 別名」のように | で区切ると、どれか 1 つが
 出てくれば載っているとみなす（テーブル名とモデル名など）。# で始まる行と空行は読み飛ばす。
@@ -183,6 +187,7 @@ class Doc(HTMLParser):
         self._context_depth = None  # 前提の節の要素を開いたときの stack の深さ（中にいる間だけ値を持つ）
         self.background = None   # 前提の節の中の背景の一覧（dl.background）の [{"dt", "dd"}]。一覧が無ければ None
         self._background_depth = None
+        self.cards = []          # 選択肢のカード（article.card#option-*）の [{"line", "section"}]
         self.in_export = False   # 質問と回答の記録の節の中か。中の属性と文字は資格情報の検査にだけ使う
         self.export_values = []  # (文字, 行)
 
@@ -222,6 +227,8 @@ class Doc(HTMLParser):
         classes = a.get("class", "").split()
         if "mermaid" in classes:
             self.mermaid_class.append(line)
+        if tag == "article" and "card" in classes and (a.get("id") or "").startswith("option-"):
+            self.cards.append({"line": line, "section": len(self.sections) - 1 if self.sections else None})
         if a.get("id") == "context" or "context" in classes:
             self.context = True
             if self._context_depth is None and tag not in VOID_TAGS:
@@ -423,6 +430,13 @@ def check_ask(doc, f):
             f.error("ask-background", "質問の背景「%s」の中身が%s。%sを1〜2文で書く"
                     % (dt or key, "空" if not dd else "短すぎる（%d文字）" % len(dd),
                        dict(ASK_BACKGROUND)[key]))
+    # 選ぶ前に、選択肢の違いを図でも確かめられるようにする
+    if not doc.figures:
+        f.error("ask-figure", "質問の資料に図が1枚も無い。流れや選択肢の違いを図で示す")
+    for i in sorted({c["section"] for c in doc.cards if c["section"] is not None}):
+        if doc.sections[i]["figures"] == 0:
+            f.warn("ask-figure", "選択肢のカードを置く節（「%s」）に図が無い。案を比較する図を同じ節に置く"
+                   "（ほかの節の図を指すだけにしない）" % (normalize(doc.sections[i]["heading"]) or "見出し無し"))
 
 
 def section_heading(doc, index):
