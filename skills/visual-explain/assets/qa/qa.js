@@ -521,6 +521,80 @@
     return '失敗 ' + clock(item.finished_at);
   }
 
+  // ---- 本文の上に出す、背景入りの資料の作成状況（質問の資料だけ）
+  // 質問欄を閉じていても、作っているのか・どこで止まったのかが本文だけで分かるようにする
+
+  function buildItem() {
+    var found = null;
+    items.forEach(function (i) { if (i.kind === 'build') found = i; });
+    return found;
+  }
+
+  function buildBarState(item) {
+    if (!ask || askState(ask) !== 'waiting' || !item) return '';
+    if (item.status === 'queued' || item.status === 'answering' || item.status === 'failed' ||
+        item.status === 'canceled') return item.status;
+    // 作り終えたのに本文が差し替わっていない（検査で取り消し・別の所で更新・変化なし）ときも出す
+    if (item.status === 'answered') return item.doc && item.doc.updated ? '' : 'failed';
+    return '';
+  }
+
+  function buildBarText(item, state) {
+    if (state === 'queued') return '背景入りの資料を待っています（前の作業が終わると始まります）';
+    if (state === 'answering') return '背景入りの資料を作成中（' + elapsed(item.started_at) + '）';
+    if (state === 'canceled') return '背景入りの資料の作成は取り消されました';
+    return '背景入りの資料を作れませんでした';
+  }
+
+  function buildBarDetail(item, state) {
+    if (state === 'answering') {
+      var steps = Array.isArray(item.progress) ? item.progress : [];
+      return steps.length ? steps[steps.length - 1].text : '準備しています。';
+    }
+    if (state === 'canceled') return '選択肢だけのページのままです。';
+    if (item.status === 'failed') return item.error || '理由は分かりませんでした。';
+    if (item.status === 'answered' && !item.doc) return '本文が変わらなかったため、選択肢だけのページのままです。';
+    var doc = item.doc || {};
+    return (doc.errors || [])[0] || '作った資料が検査を通らなかったため、本文は差し替えていません。';
+  }
+
+  function placeBuildBar(bar) {
+    var main = document.querySelector('.page > main') || document.querySelector('main');
+    if (!main) return false;
+    var header = null;
+    Array.prototype.forEach.call(main.children, function (n) {
+      if (!header && n.tagName === 'HEADER') header = n;
+    });
+    main.insertBefore(bar, header ? header.nextSibling : main.firstChild);
+    return true;
+  }
+
+  function renderBuildBar() {
+    var bar = document.getElementById('ve-qa-buildbar');
+    var item = buildItem();
+    var state = buildBarState(item);
+    if (!state) { if (bar) bar.remove(); return; }
+    if (!bar) {
+      bar = el('div', { class: 've-qa ve-qa-buildbar', id: 've-qa-buildbar', role: 'status', 'aria-live': 'polite' }, [
+        el('p', { class: 've-qa-buildbar-line' }, [
+          el('span', { class: 've-qa-buildbar-dot', 'aria-hidden': 'true' }),
+          el('span', { class: 've-qa-buildbar-text' })
+        ]),
+        el('p', { class: 've-qa-buildbar-detail' }),
+        el('p', { class: 've-qa-buildbar-hint' })
+      ]);
+      if (!placeBuildBar(bar)) return;
+    }
+    bar.setAttribute('data-status', state);
+    bar.querySelector('.ve-qa-buildbar-text').textContent = buildBarText(item, state);
+    var detail = bar.querySelector('.ve-qa-buildbar-detail');
+    var text = buildBarDetail(item, state);
+    detail.textContent = text;
+    detail.hidden = !text;
+    bar.querySelector('.ve-qa-buildbar-hint').textContent =
+      state === 'queued' || state === 'answering' ? 'できたら、このページが差し替わります。' : '選択肢だけでも答えられます。';
+  }
+
   function stepList(steps, current) {
     var ol = el('ol', { class: 've-qa-steps' });
     steps.forEach(function (s, i) {
@@ -561,7 +635,14 @@
 
   function docNote(doc) {
     if (!doc) return null;
-    if (doc.updated) return el('p', { class: 've-qa-doc' }, ['資料を直しました: ', sectionLinks(doc.sections)]);
+    if (doc.updated) {
+      var p = el('p', { class: 've-qa-doc' }, ['資料を直しました: ', sectionLinks(doc.sections)]);
+      if (doc.ignored && doc.ignored.length) {
+        p.appendChild(el('span', { class: 've-qa-meta',
+          text: '（別リポジトリの参照 ' + doc.ignored.join('、') + ' は検査から除きました）' }));
+      }
+      return p;
+    }
     if (doc.reverted) {
       var d = el('details', { class: 've-qa-doc ve-qa-doc-warn' }, [
         el('summary', { text: '本文の修正は検査を通らなかったため取り消しました' })]);
@@ -1012,6 +1093,7 @@
     items = st.items || [];
     render();
     renderAsk(st.ask || null);
+    renderBuildBar();
     if (WIN && !loaded) list.scrollTop = list.scrollHeight;
     if (fresh.length && !open) {
       unseen += fresh.length;
@@ -1074,6 +1156,7 @@
         rev = newRev;
         naturalSize();
         updateToc();
+        renderBuildBar();  // 本文を差し替えたので、作成状況の帯も入れ直す
         if (cause && cause.kind === 'build') {
           // 選択肢だけのページが、作った資料に丸ごと替わった。節ごとの印は付けない
           showToast(['選ぶための資料ができました。']);

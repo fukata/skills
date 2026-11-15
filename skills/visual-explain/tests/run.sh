@@ -106,6 +106,13 @@ check "'askbg' は --ask が無ければ通る"          "$C '$TMP/askbg/explana
 mut asknodl  '<dl class="terms background">' '<dl class="terms">'
 check "'asknodl' は --ask で [ask-background] のエラー" "out=\$($C '$TMP/asknodl/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-background\]' <<<\"\$out\""
 check "'noctx' は --ask で [ask-context] のエラー" "out=\$($C '$TMP/noctx/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-context\]' <<<\"\$out\""
+# 見出しだけ置いて中身が空・薄い背景でも通っていた
+mut askempty '<dt>聞く理由</dt><dd>仕様に時刻の決まりが無く、経理の締めの都合で答えが変わるため。</dd>' '<dt>聞く理由</dt><dd></dd>'
+check "'askempty' は --ask で [ask-background] のエラー" "out=\$($C '$TMP/askempty/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-background\].*聞く理由.*空' <<<\"\$out\""
+mut askshort '<dt>判断の軸</dt><dd>集計の早さを取るか、更新の失敗を待つかで答えが変わる。</dd>' '<dt>判断の軸</dt><dd>好み。</dd>'
+check "'askshort' は --ask で [ask-background] のエラー" "out=\$($C '$TMP/askshort/explanation.html' --ask --repo '$TMP/git' --no-browser); [ \$? -eq 1 ] && grep -q 'ERROR \[ask-background\].*判断の軸.*短すぎる' <<<\"\$out\""
+mut asknone '<dd>更新は毎月1日のまま変えない。</dd>' '<dd>無し</dd>'
+check "「決まっていること」が「無し」なら通る" "$C '$TMP/asknone/explanation.html' --ask --repo '$TMP/git' --no-browser | grep -q 'errors=0'"
 check "見出しが「背景」の節も前提とみなす"      "! $C '$TMP/bgctx/explanation.html' --repo '$TMP/git' --no-browser | grep -q 'WARN  \[context\]'"
 check "素のディレクトリでも識別子の欠けを拾う" "$C '$TMP/ident/explanation.html' --repo '$TMP/plain' --no-browser | grep -q 'WARN  \[identifier\]'"
 check "'term' は略語とチケット番号を 1 件ずつ出す" "out=\$($C '$TMP/term/explanation.html' --repo '$TMP/git' --no-browser); grep -q '「PdM」' <<<\"\$out\" && grep -q '「PAY-123」' <<<\"\$out\""

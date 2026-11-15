@@ -49,7 +49,8 @@ serve.py export が書き出した「読者からの質問と回答」の節（<
 
 --ask: AskUserQuestion（request_user_input）の質問の資料として検査する。前提の節に、質問の背景の一覧
 （<dl class="terms background">）を置き、見出し（dt）が「作業」「聞く理由」「決まっていること」「判断の軸」
-「答えた後」で始まる項目をそろえる。欠けていればエラー。選択肢だけでは、なぜ聞かれているのか分からないため。
+「答えた後」で始まる項目をそろえる。欠けていればエラー。各項目の中身（dd）が空、または短すぎてもエラー
+（「決まっていること」の「無し」は除く）。選択肢だけでは、なぜ聞かれているのか分からないため。
 
 --inventory の書式: 1 行に 1 要素。「名前 | 別名 | 別名」のように | で区切ると、どれか 1 つが
 出てくれば載っているとみなす（テーブル名とモデル名など）。# で始まる行と空行は読み飛ばす。
@@ -133,6 +134,7 @@ ASK_BACKGROUND = [
     ("判断の軸", "何を重く見るかで答えが変わるか（速さ・保守性・互換性など）"),
     ("答えた後", "答えた後に何をするか・後から変えやすいか"),
 ]
+ASK_BACKGROUND_MIN = 8  # 背景の各項目の中身の最低文字数（「無し」だけの「決まっていること」は除く）。見出しだけの空欄を防ぐ
 # 略語（PdM・API）、チケット番号（ABC-123）、クラス名（QuoteService）。大文字を 2 つ以上含む英数字の語。
 # 前後は ASCII だけで区切る（Python の \w は日本語の文字にも当たり、「のAPIを」を取りこぼすため）
 TERM_RE = re.compile(r"(?<![A-Za-z0-9_./:#@-])([A-Z][A-Z0-9]+-\d+|[A-Za-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*)"
@@ -179,7 +181,7 @@ class Doc(HTMLParser):
         self.sections = []       # h2 ごと {"heading", "line", "figures", "items", "keys"}
         self.context = False     # 前提の節（id="context" / class="context"）があるか
         self._context_depth = None  # 前提の節の要素を開いたときの stack の深さ（中にいる間だけ値を持つ）
-        self.background = None   # 前提の節の中の背景の一覧（dl.background）の dt の文字。一覧が無ければ None
+        self.background = None   # 前提の節の中の背景の一覧（dl.background）の [{"dt", "dd"}]。一覧が無ければ None
         self._background_depth = None
         self.in_export = False   # 質問と回答の記録の節の中か。中の属性と文字は資格情報の検査にだけ使う
         self.export_values = []  # (文字, 行)
@@ -229,7 +231,7 @@ class Doc(HTMLParser):
             self.background = self.background or []
             self._background_depth = len(self.stack)
         if tag == "dt" and self._background_depth is not None:
-            self.background.append("")
+            self.background.append({"dt": "", "dd": ""})
         if tag == "svg" and not self._in("svg"):
             self.svgs.append({"line": line, "title": False, "width": re.fullmatch(r"\s*[\d.]+\s*(?:px)?\s*",
                                                                                  a.get("width", "")) is not None,
@@ -291,8 +293,11 @@ class Doc(HTMLParser):
             return
         if self._in("h2") and self.sections:
             self.sections[-1]["heading"] += data
-        if self._background_depth is not None and self._in("dt") and self.background:
-            self.background[-1] += data
+        if self._background_depth is not None and self.background:
+            if self._in("dt"):
+                self.background[-1]["dt"] += data
+            elif self._in("dd"):
+                self.background[-1]["dd"] += data
         if self._code is not None:
             self._code["text"] += data
         else:
@@ -402,10 +407,22 @@ def check_ask(doc, f):
         f.error("ask-background", "前提の節に、質問の背景の一覧（<dl class=\"terms background\">）が無い。dt を %s にして書く"
                 % "・".join("「%s」" % k for k, _ in ASK_BACKGROUND))
         return
-    heads = [normalize(t) for t in doc.background]
+    heads = [normalize(item["dt"]) for item in doc.background]
     for key, meaning in ASK_BACKGROUND:
         if not any(h.startswith(key) for h in heads):
             f.error("ask-background", "質問の背景の一覧に「%s」が無い。%sを書く" % (key, meaning))
+    for item in doc.background:
+        dt, dd = normalize(item["dt"]), normalize(item["dd"])
+        key = next((k for k, _ in ASK_BACKGROUND if dt.startswith(k)), None)
+        if key is None:
+            continue  # 必要な項目の欠けは上で報告する
+        # 「決まっていること」は、無いことを「無し」と書ける
+        if key == "決まっていること" and re.fullmatch(r"(?:特に|とくに)?(?:無し|なし)[。.]?", dd):
+            continue
+        if len(dd) < ASK_BACKGROUND_MIN:
+            f.error("ask-background", "質問の背景「%s」の中身が%s。%sを1〜2文で書く"
+                    % (dt or key, "空" if not dd else "短すぎる（%d文字）" % len(dd),
+                       dict(ASK_BACKGROUND)[key]))
 
 
 def section_heading(doc, index):
@@ -701,8 +718,8 @@ def check_code(doc, repo, ignore, f, stats):
                 f.warn("ref-ambiguous", "「%s」は %d 個のファイルに当たり、どれか決められない（例: %s）。パスを書く" %
                        (r["raw"], len(candidates), ", ".join(candidates[:3])), r["line"])
             else:
-                f.error("ref-missing", "「%s」のファイルがリポジトリに無い（別リポジトリなら --ignore-ref で除く）" %
-                        r["raw"], r["line"])
+                f.error("ref-missing", "「%s」のファイルがリポジトリに無い（別リポジトリなら --ignore-ref %s で除く）" %
+                        (r["raw"], r["path"]), r["line"])
             continue
         resolved += 1
         if r["start"] is None:

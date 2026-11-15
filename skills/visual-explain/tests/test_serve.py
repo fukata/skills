@@ -1359,7 +1359,8 @@ class WidgetTest(ServeTestBase):
                   '<svg viewBox="0 0 10 10"><title>図</title><rect width="5" height="5"/></svg>')
         with open(os.path.join(self.material, "qa", "qa.json"), "w") as f:
             json.dump({"items": [{"id": "q1", "question": "質問の本文", "status": "answered", "answer_html": danger,
-                                  "doc": {"updated": True, "sections": [{"id": "flow", "title": "流れ"}]},
+                                  "doc": {"updated": True, "sections": [{"id": "flow", "title": "流れ"}],
+                                          "ignored": ["other-repo/lib/tool.sh"]},
                                   "progress": [{"text": "資料を読んでいます"}, {"text": "回答を書いています"}],
                                   "answer_check": {"errors": ["Markdown の記法"], "count": 1}},
                                  {"id": "q2", "question": "取り消した質問", "status": "canceled"},
@@ -1388,6 +1389,7 @@ class WidgetTest(ServeTestBase):
         self.assertIn('class="ve-qa-resize"', root)
         self.assertIn('role="separator"', root)
         self.assertIn("調べた手順（2）", root)
+        self.assertIn("別リポジトリの参照 other-repo/lib/tool.sh は検査から除きました", root)
         self.assertIn("回答の図・リンクの検査で問題が 1 件", root)
         self.assertIn("取り消し済み", root)
         self.assertIn("回答を資料に書き出す", root)
@@ -1557,6 +1559,87 @@ class AskTest(ServeTestBase):
         with open(m.path, encoding="utf-8") as f:
             self.assertIn("検査用の資料", f.read())
         self.assertIn("資料を書いています", [p["text"] for p in item["progress"]])
+
+    @unittest.skipUnless(check.find_chrome(None), "ヘッドレス Chrome が見つからない")
+    def test_shows_build_progress_in_the_page_body(self):
+        """本文の上にも、背景入りの資料の作成状況が出る（質問欄を閉じていても分かる）。"""
+        # つなぎっぱなしの SSE があると --dump-dom が終わらないので、このテストでは切る
+        self.start(presence=False)
+        _, reg = self.register(build="never", wait=600)
+        doc = reg["doc"]
+        m = serve.Material(self.app.cfg, doc)
+        ask = serve.read_json(m.ask_path)
+        ask["build"] = True
+        serve.write_json(m.ask_path, ask)
+
+        def body(items, name):
+            serve.write_json(m.state_path, {"items": items})
+            # フックが待っている印を付け直す（待っていないと作成状況を出さない）
+            self.req("GET", "/__qa/ask-status?doc=" + doc)
+            url = "http://127.0.0.1:%d/%s?k=%s" % (self.port, doc, TOKEN)
+            out = subprocess.run([check.find_chrome(None), "--headless", "--no-sandbox", "--disable-gpu",
+                                  "--user-data-dir=" + os.path.join(self.tmp, name), "--virtual-time-budget=8000",
+                                  "--dump-dom", url], capture_output=True, text=True, timeout=60).stdout
+            return out[out.index("<main"):out.index("</main>")]
+
+        main = body([{"id": "q1", "kind": "build", "status": "answering",
+                      "started_at": serve.now(-12), "progress": [{"text": "資料を書いています"}]}], "chrome-build")
+        self.assertIn('id="ve-qa-buildbar"', main)
+        self.assertIn("背景入りの資料を作成中", main)
+        self.assertIn("資料を書いています", main)
+        # 作れなかったときは、理由も本文に出す
+        main = body([{"id": "q1", "kind": "build", "status": "failed", "error": "検査を通りませんでした"}],
+                    "chrome-build-failed")
+        self.assertIn("背景入りの資料を作れませんでした", main)
+        self.assertIn("検査を通りませんでした", main)
+        # 作り終えたのに本文が変わっていないときも出す
+        main = body([{"id": "q1", "kind": "build", "status": "answered"}], "chrome-build-noop")
+        self.assertIn("本文が変わらなかった", main)
+        # できたら消える
+        main = body([{"id": "q1", "kind": "build", "status": "answered",
+                      "doc": {"updated": True, "reverted": False}}], "chrome-build-done")
+        self.assertNotIn('id="ve-qa-buildbar"', main)
+
+    def test_applies_the_doc_when_only_other_repo_refs_are_missing(self):
+        """別リポジトリの参照だけで検査に落ちたら、その参照を除いて差し替える（背景を失わない）。"""
+        self.start()
+        questions = json.loads(json.dumps(QUESTIONS))
+        questions[0]["question"] = "BUILD REFMISS どちらの案にしますか？"
+        status, reg = self.register(questions)
+        self.assertEqual(status, 201, reg)
+        self.assertTrue(self.app.wait_idle(30))
+        item = self.ask_state(reg["doc"])["items"][0]
+        self.assertEqual(item["status"], "answered", item)
+        self.assertTrue(item["doc"]["updated"], item)
+        self.assertEqual(item["doc"]["ignored"], ["other-repo/lib/tool.sh"])
+        with open(serve.Material(self.app.cfg, reg["doc"]).path, encoding="utf-8") as f:
+            self.assertIn("other-repo/lib/tool.sh", f.read())
+
+    def test_does_not_ignore_refs_when_other_errors_exist(self):
+        """参照の欠け以外の誤りが混ざっているときは、差し替えない（誤りを見逃さない）。"""
+        self.start()
+        questions = json.loads(json.dumps(QUESTIONS))
+        questions[0]["question"] = "BUILD REFMISS BREAK どちらの案にしますか？"
+        status, reg = self.register(questions)
+        self.assertEqual(status, 201, reg)
+        self.assertTrue(self.app.wait_idle(30))
+        item = self.ask_state(reg["doc"])["items"][0]
+        self.assertEqual(item["status"], "answered", item)
+        self.assertFalse(item["doc"]["updated"], item)
+        self.assertTrue(item["doc"]["reverted"], item)
+        self.assertTrue(any("anchor" in e for e in item["doc"]["errors"]), item["doc"]["errors"])
+
+    def test_build_timeout_is_separate_from_answer_timeout(self):
+        """資料作りの上限は、回答の上限とは別に持つ（資料作りだけ長く待つ）。"""
+        self.start(answer_timeout=30, build_timeout=1)
+        questions = json.loads(json.dumps(QUESTIONS))
+        questions[0]["question"] = "SLEEP どちらの案にしますか？"
+        status, reg = self.register(questions)
+        self.assertEqual(status, 201, reg)
+        self.assertTrue(self.app.wait_idle(20))
+        item = self.ask_state(reg["doc"])["items"][0]
+        self.assertEqual(item["status"], "failed", item)
+        self.assertIn("資料作りが時間内（1秒）", item["error"])
 
     def test_answer_has_the_askuserquestion_shape(self):
         self.start()

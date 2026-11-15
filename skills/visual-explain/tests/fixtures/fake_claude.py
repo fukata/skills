@@ -14,6 +14,7 @@
   MDANSWER  回答に Markdown の記法を残す（回答の検査でエラー）
   ORPHAN    標準出力を持ったまま別のセッションで眠る孫を残して終わる（読み取りで止まらないことの確認）
   BUILD     作業用コピーを、検査を通る資料（fixtures/valid）に丸ごと書き換える（AskUserQuestion の資料作り）
+  REFMISS   作業用コピーに、別リポジトリの存在しないファイル参照を足す（--ignore-ref の確認）
 出力は --output-format stream-json と同じ 1 行 1 イベント。資料を読む・回答を書くツールの呼び出しも出す。
 --resume の ID で失敗を作る: missing-session は会話が無い、toolong-session と too-long-origin（分岐）は長すぎる。
 引数と環境の一部を FAKE_CLAUDE_LOG（JSON Lines）に記録する。
@@ -112,6 +113,10 @@ def main():
         tool("Write", file_path=draft, content="...")
         shutil.copyfile(os.path.join(valid, "explanation.html"), draft)
         shutil.copytree(os.path.join(valid, "images"), os.path.join(os.path.dirname(draft), "images"), dirs_exist_ok=True)
+    if "REFMISS" in question:
+        s = open(draft, encoding="utf-8").read()
+        s = s.replace("<h2>流れ</h2>", "<h2>流れ</h2><p><code>other-repo/lib/tool.sh:1</code> を直す。</p>", 1)
+        open(draft, "w", encoding="utf-8").write(s)
     if "EDIT" in question or "BREAK" in question or "TOUCHDOC" in question or "SCRIPT" in question:
         s = open(draft, encoding="utf-8").read()
         if "SCRIPT" in question:

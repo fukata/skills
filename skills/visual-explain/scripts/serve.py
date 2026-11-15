@@ -59,7 +59,7 @@ SKILL_MD = os.path.join(SKILL_DIR, "SKILL.md")
 TEMPLATE = os.path.join(SKILL_DIR, "assets", "explanation.html")
 BUILD_PROMPT = os.path.join(SKILL_DIR, "assets", "ask", "build-prompt.md")
 SERVE_PY = os.path.abspath(__file__)
-VERSION = "1.4.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
+VERSION = "1.5.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
 ASK_CHILD_ENV = "VISUAL_EXPLAIN_ASK_CHILD"  # 配信サーバーが動かす claude -p の印。フックはこの中の質問を扱わない
 
 QA_DIR = "qa"                 # 資料フォルダの中で質問と回答を置くフォルダ。静的配信では返さない
@@ -117,6 +117,7 @@ MAIN_END_RE = re.compile(r"</main\s*>", re.I)
 NAV_RE = re.compile(r"<nav\b([^>]*)>(.*?)</nav\s*>", re.I | re.S)
 ID_RE = re.compile(r"(?<![\w-])id\s*=\s*[\"']([^\"']+)[\"']", re.I)
 STAMP_RE = re.compile(r"（\d+ 件。(\d{4}-\d\d-\d\d \d\d:\d\d) に書き出し）")
+REF_MISSING_RE = re.compile(r"^ERROR \[ref-missing\] L\d+: 「(.+?)」のファイルがリポジトリに無い")
 
 
 def now(after=0):
@@ -563,7 +564,8 @@ class Config:
     prompt: str = DEFAULT_PROMPT
     check_cmd: str = None        # None は visual-explain の検査、"" は検査しない。{file} を作業用コピーのパスに置き換える
     browser_check: bool = True
-    answer_timeout: int = 900
+    answer_timeout: int = 900     # 回答の上限
+    build_timeout: int = 1500     # 資料作りの上限（質問の答えを待つ時間より短くする）
     model: str = None
     claude_home: str = None      # 会話の記録を探す場所（既定は CLAUDE_CONFIG_DIR か ~/.claude）
     codex_home: str = None       # Codex の会話の記録を探す場所（既定は CODEX_HOME か ~/.codex）
@@ -1916,8 +1918,11 @@ class App:
         if canceled:
             return Result(False, error=CANCELED, canceled=True)
         if timed_out:
-            return Result(False, error="回答が時間内（%d秒）に終わらなかったため止めた。質問を分けて送り直してください。"
-                          % self.cfg.answer_timeout, timed_out=True)
+            limit = self.cfg.build_timeout if job.building else self.cfg.answer_timeout
+            what = "資料作り" if job.building else "回答"
+            hint = "質問を分けるか、選択肢を減らして送り直してください。" if job.building else "質問を分けて送り直してください。"
+            return Result(False, error="%sが時間内（%d秒）に終わらなかったため止めた。%s" % (what, limit, hint),
+                          timed_out=True)
         if self.stopping.is_set():
             return Result(False, error="配信を止めたため中断した。")
         ok, text, session_id, error = reader.result(proc.returncode, "".join(err), "".join(raw))
@@ -1928,7 +1933,8 @@ class App:
     def wait_agent(self, m, qid, proc, job):
         """エージェントの終わりを待つ。時間切れ・取り消し・配信の停止では SIGTERM を送り、KILL_GRACE 秒後も残っていれば
         SIGKILL で止める。戻り値は時間切れだったか。"""
-        deadline = time.time() + self.cfg.answer_timeout if self.cfg.answer_timeout else None
+        limit = self.cfg.build_timeout if job.building else self.cfg.answer_timeout
+        deadline = time.time() + limit if limit else None
         timed_out, term_at, next_check = False, None, 0
         while True:
             try:
@@ -2023,6 +2029,24 @@ class App:
 
     # ---- 本文の差し替え
 
+    @staticmethod
+    def missing_ref_prefixes(output):
+        """検査のエラーが「リポジトリに無いファイル参照」だけなら、そのパスを返す（別リポジトリの参照）。
+        ほかのエラーが混ざっているときは空（誤りを見逃さないため）。"""
+        errors = [line.strip() for line in output.splitlines() if line.lstrip().startswith("ERROR")]
+        if not errors or not all("[ref-missing]" in e for e in errors):
+            return []
+        found = []
+        for e in errors:
+            found_match = REF_MISSING_RE.search(e)
+            if not found_match:
+                return []
+            # エラー文の「path:12-14」から、--ignore-ref に渡すパスだけにする
+            path = re.sub(r":\d+(?:-\d+)?$", "", found_match.group(1))
+            if path and path not in found:
+                found.append(path)
+        return found
+
     def apply_draft(self, m, qid, original):
         try:
             with open(m.draft, "rb") as f:
@@ -2040,12 +2064,29 @@ class App:
                     "errors": ["本文に script・イベント属性・外部の資源が増えたため、修正を取り消した（%s）"
                                % "、".join(sorted(added))]}
         argv = self.check_argv(m, m.draft)
+        ignored = []
         if argv:
             try:
                 code, out, err = self.run_check(argv, m.dir)
                 failed, output = code != 0, out + err
             except (OSError, subprocess.SubprocessError) as e:
                 failed, output = True, "検査を実行できなかった: %s" % e
+            if failed and self.cfg.check_cmd is None and (read_json(m.origin_path) or {}).get("ask"):
+                # 質問の資料では、別リポジトリのファイル参照だけで検査に落ちることがある。その参照だけを
+                # 除いてもう一度検査し、ほかに誤りが無ければ差し替える（見送ると背景の資料が失われるため）
+                prefixes = self.missing_ref_prefixes(output)
+                if prefixes:
+                    extra = []
+                    for p in prefixes:
+                        extra += ["--ignore-ref", p]
+                    try:
+                        code, out, err = self.run_check(argv + extra, m.dir)
+                        if code == 0:
+                            failed, ignored = False, prefixes
+                        else:
+                            output = out + err
+                    except (OSError, subprocess.SubprocessError):
+                        pass
             if failed:
                 errors = [line.strip() for line in output.splitlines() if line.lstrip().startswith("ERROR")][:5]
                 return {"updated": False, "reverted": True, "conflict": False, "sections": [],
@@ -2058,7 +2099,7 @@ class App:
         sections = changed_sections(original.decode("utf-8", "replace"), draft.decode("utf-8", "replace"))
         os.replace(m.draft, m.path)
         return {"updated": True, "reverted": False, "conflict": False, "sections": sections,
-                "rev": file_rev(m.path), "errors": []}
+                "rev": file_rev(m.path), "errors": [], "ignored": ignored}
 
     @staticmethod
     def unchanged(m, original):
@@ -2483,7 +2524,8 @@ def serve_main(args):
         return 2
     cfg = Config(root=args.dir, port=args.port, bind=args.bind, repo=args.repo, claude=shlex.split(args.claude),
                  codex=shlex.split(args.codex), opencode=shlex.split(args.opencode), agent=args.agent, token=args.token, doc_name=args.doc_name, prompt=args.prompt, check_cmd=args.check_cmd,
-                 browser_check=not args.no_browser_check, answer_timeout=args.answer_timeout, model=args.model,
+                 browser_check=not args.no_browser_check, answer_timeout=args.answer_timeout,
+                 build_timeout=args.build_timeout, model=args.model,
                  qa=not args.no_qa, allow_host=args.allow_host, local_only=args.local_only, private=args.private,
                  workers=args.workers, prefs=os.path.join(ask_home(), VIEWER_PREFS))
     app = App(cfg)
@@ -2690,6 +2732,8 @@ def main(argv=None):
     s.add_argument("--repo", help="説明したリポジトリ。検査の --repo と、新しいセッションの作業ディレクトリに使う")
     s.add_argument("--max-time", type=parse_duration, default=parse_duration("2h"), help="この時間で自動停止（既定 2h、0 は上限なし）")
     s.add_argument("--answer-timeout", type=parse_duration, default=parse_duration("15m"), help="1 件の回答の上限（既定 15m）")
+    s.add_argument("--build-timeout", type=parse_duration, default=parse_duration("25m"),
+                   help="1 件の資料作りの上限（既定 25m。答えを待つ時間より短くする）")
     s.add_argument("--claude", default=os.environ.get("VISUAL_EXPLAIN_CLAUDE", "claude"), help="claude を起動するコマンド")
     s.add_argument("--codex", default=os.environ.get("VISUAL_EXPLAIN_CODEX", "codex"), help="codex を起動するコマンド")
     s.add_argument("--opencode", default=os.environ.get("VISUAL_EXPLAIN_OPENCODE", "opencode"), help="opencode を起動するコマンド")

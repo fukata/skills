@@ -51,6 +51,26 @@ body.ve-qa-open .ve-qa-toggle { display: none; }
 .ve-qa-q p { margin: 4px 0; white-space: pre-wrap; }
 .ve-qa-meta, .ve-qa-status { color: var(--qa-muted); font-size: .8rem; margin: 4px 0; }
 .ve-qa-item[data-status="answering"] .ve-qa-status::before { content: "● "; color: var(--qa-key); }
+/* 本文の上に出す、背景入りの資料の作成状況（質問の資料だけ。質問欄を閉じていても分かる） */
+.ve-qa-buildbar { margin: 0 0 22px; padding: 10px 14px; border: 1px solid var(--qa-line);
+                  border-left: 4px solid var(--qa-key); border-radius: 8px; background: var(--qa-soft); }
+.ve-qa-buildbar[data-status="failed"] { border-left-color: var(--qa-warn); background: var(--qa-warn-bg); }
+.ve-qa-buildbar[data-status="canceled"] { border-left-color: var(--qa-muted); }
+.ve-qa-buildbar p { margin: 0; }
+.ve-qa-buildbar .ve-qa-buildbar-line { display: flex; align-items: baseline; gap: 8px; font-weight: 700; }
+.ve-qa-buildbar-dot { flex: none; width: .6em; height: .6em; border-radius: 50%; background: var(--qa-key); }
+.ve-qa-buildbar[data-status="queued"] .ve-qa-buildbar-dot { background: var(--qa-muted); }
+.ve-qa-buildbar[data-status="failed"] .ve-qa-buildbar-dot { background: var(--qa-warn); }
+.ve-qa-buildbar[data-status="canceled"] .ve-qa-buildbar-dot { background: var(--qa-muted); }
+.ve-qa-buildbar[data-status="answering"] .ve-qa-buildbar-dot { animation: ve-qa-pulse 1.4s ease-in-out infinite; }
+.ve-qa-buildbar .ve-qa-buildbar-detail { margin-top: 2px; color: var(--qa-muted); font-size: .85rem; overflow-wrap: anywhere; }
+.ve-qa-buildbar .ve-qa-buildbar-detail[hidden] { display: none; }
+.ve-qa-buildbar .ve-qa-buildbar-hint { margin-top: 2px; color: var(--qa-muted); font-size: .8rem; }
+@keyframes ve-qa-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) {
+  .ve-qa-buildbar[data-status="answering"] .ve-qa-buildbar-dot { animation: none; }
+}
+@media print { #ve-qa-buildbar { display: none; } }
 .ve-qa-tag { display: inline-block; padding: 0 8px; border-radius: 4px; font-size: .75rem; font-weight: 700;
              background: var(--qa-soft); border: 1px solid var(--qa-line); }
 .ve-qa-a { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--qa-line); overflow-wrap: anywhere; }
