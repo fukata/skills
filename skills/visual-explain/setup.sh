@@ -42,7 +42,8 @@ sys.exit(0 if names else 1)' "$CLAUDE_DIR/settings.json")"; then
 fi
 if [ "$want_claude" = 1 ]; then
   python3 -I "$SKILL/scripts/hooks_config.py" add --agent claude --file "$CLAUDE_DIR/settings.json" --skill "$SKILL"
-  echo "Claude Code: $CLAUDE_DIR/settings.json に SessionStart と PreToolUse（AskUserQuestion）の hook を登録した"
+  echo "Claude Code: $CLAUDE_DIR/settings.json に SessionStart と PermissionRequest（AskUserQuestion）の hook を登録した"
+  echo "  質問はターミナルの選択画面と資料のページの両方で答えられる（先に答えた方が使われる。前の版の PreToolUse の登録は外した）"
 fi
 if [ "$want_codex" = 1 ]; then
   python3 -I "$SKILL/scripts/hooks_config.py" add --agent codex --file "$CODEX_DIR/hooks.json" --skill "$SKILL"

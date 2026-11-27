@@ -1745,6 +1745,24 @@ class AskTest(ServeTestBase):
         self.assertIn("デスクトップ通知", inbox)
 
     @unittest.skipUnless(check.find_chrome(None), "Chrome が無い")
+    def test_page_says_the_terminal_also_asks_when_the_dialog_is_open(self):
+        # PermissionRequest の hook なら、ページと並んでターミナル（Orca の chat UI を含む）の選択画面でも答えられる
+        self.start(presence=False)
+        _, reg = self.register(QUESTIONS[:1], build="never", terminal_dialog=True)
+        root = self.dump(reg["doc"])
+        root = root[root.index('id="ve-qa-root"'):]
+        self.assertIn("ターミナルの選択画面でも答えられます", root)
+        self.assertNotIn("ターミナルの選択画面は出ません", root)
+        self.req("POST", "/__qa/ask-close", {"doc": reg["doc"], "reason": "terminal"})
+        root = self.dump(reg["doc"])
+        root = root[root.index('id="ve-qa-root"'):]
+        self.assertIn("ページからは送れません", root)
+        self.assertNotIn("ターミナルに選択画面が出ています", root)
+        _, old = self.register(QUESTIONS[1:], build="never")
+        root = self.dump(old["doc"])
+        self.assertIn("ターミナルの選択画面は出ません", root[root.index('id="ve-qa-root"'):])
+
+    @unittest.skipUnless(check.find_chrome(None), "Chrome が無い")
     def test_page_names_codex_when_codex_asked(self):
         self.start(presence=False)
         _, reg = self.register(QUESTIONS[:1], session_id="thread-1", agent="codex", build="never")
@@ -1951,6 +1969,40 @@ class AskHookTest(ServeTestBase):
         self.assertEqual(res["updatedInput"]["questions"], QUESTIONS)
         self.assertEqual(res["updatedInput"]["answers"], {"どちらの案にしますか？": "案A", "直す所は？": "フック"})
         self.assertEqual(res["updatedInput"]["annotations"], {"どちらの案にしますか？": {"notes": "メモ"}})
+
+    def test_returns_the_page_answer_to_the_permission_request(self):
+        # PermissionRequest の hook は、ターミナルの選択画面と並んで動く。ページで答えると、その答えで選択画面が閉じる
+        self.start()
+        self.configure()
+        proc = self.run_hook({"session_id": "origin-ask", "cwd": self.repo, "hook_event_name": "PermissionRequest",
+                              "tool_name": "AskUserQuestion", "tool_input": {"questions": QUESTIONS}})
+        doc = self.registered()
+        self.assertIs(json.loads(self.req("GET", "/__qa/state?doc=" + doc)[2])["ask"]["terminal_dialog"], True)
+        status, _, data = self.req("POST", "/__qa/answer", {"doc": doc, "answers": {
+            "どちらの案にしますか？": {"selected": ["案A"], "notes": "メモ"}, "直す所は？": {"selected": ["フック"]}}})
+        self.assertEqual(status, 200, data)
+        out, err = proc.communicate(timeout=15)
+        self.assertEqual(proc.returncode, 0, err)
+        res = json.loads(out)
+        self.assertIn("資料のページで答えました: http://localhost:%d/%s" % (self.port, doc), res["systemMessage"])
+        spec = res["hookSpecificOutput"]
+        self.assertEqual(spec["hookEventName"], "PermissionRequest")
+        self.assertNotIn("permissionDecision", spec)
+        decision = spec["decision"]
+        self.assertEqual(decision["behavior"], "allow")
+        self.assertEqual(decision["updatedInput"]["questions"], QUESTIONS)
+        self.assertEqual(decision["updatedInput"]["answers"], {"どちらの案にしますか？": "案A", "直す所は？": "フック"})
+        self.assertEqual(decision["updatedInput"]["annotations"], {"どちらの案にしますか？": {"notes": "メモ"}})
+
+    def test_pretooluse_hook_tells_the_page_the_terminal_does_not_ask(self):
+        # 前の版の登録（PreToolUse）のままなら、hook が待つ間はターミナルに選択画面が出ない
+        self.start()
+        self.configure()
+        proc = self.run_hook()
+        doc = self.registered()
+        self.assertIs(json.loads(self.req("GET", "/__qa/state?doc=" + doc)[2])["ask"]["terminal_dialog"], False)
+        self.req("POST", "/__qa/ask-close", {"doc": doc, "reason": "terminal"})
+        proc.communicate(timeout=15)
 
     def test_terminal_choice_lets_the_terminal_ask(self):
         self.start()

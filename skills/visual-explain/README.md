@@ -18,6 +18,7 @@ bash ~/.agents/skills/visual-explain/setup.sh
 - `setup.sh` は、Claude Code の `~/.claude/settings.json` と Codex の `~/.codex/hooks.json` に hook を、OpenCode の設定フォルダ（`~/.config/opencode/`）の `plugins/` に受け箱の plugin を登録します（設定フォルダや `opencode` コマンドがあるものを対象にします。`--claude` / `--codex` / `--opencode` で絞れます）。hook は、セッションの開始時に受け箱の配信サーバーを起動し、エージェントの質問をページに出します。
 - **Codex は、hook を信頼するまで動かしません。** `setup.sh` の後に Codex を開き、`/hooks` で visual-explain の 2 つの hook を信頼してください。
 - **OpenCode は、起動し直すと効きます。** 登録は `~/.config/opencode/plugins/visual-explain.js`（スキルの中の `opencode/plugin.js` を読み込む 1 行）を置くだけです。OpenCode を起動し直すと、`question` ツールの質問に資料のページで答えられるようになります。スキルを更新しても置き直しは要りません。
+- **前の版から更新したら、`setup.sh` を実行し直してください。** 前の版は Claude Code の hook を PreToolUse に登録していて、ページで待つ間はターミナルの選択画面が出ませんでした（Orca の chat UI の質問カードで答えても進みませんでした）。実行し直すと PermissionRequest に移ります。
 - plugin 版の visual-explain を入れている場合は、先に外してください（`/plugin uninstall visual-explain@<marketplace>`）。両方あると hook が二重に動き、受け箱の配信サーバーがポートを取り合います。`setup.sh` は plugin 版が有効なら止まります。
 
 外すとき:
@@ -106,7 +107,7 @@ VOICEVOX のエディターかエンジンが起動していれば、`--speech v
 
 ## エージェントの質問に資料のページで答える
 
-受け箱を一度でも開くと、それ以降のエージェントの質問は資料のページで答えを待ちます。ページで選んで送ると、答えが元のセッションに戻ります。受け箱の URL は次で表示します（変わらないのでブックマークできます）。
+受け箱を一度でも開くと、それ以降のエージェントの質問は資料のページで答えを待ちます。ページで選んで送ると、答えが元のセッションに戻ります。Claude Code では、ターミナルの選択画面も同時に出て（Orca の chat UI の質問カードでも答えられます）、先に答えた方が使われます。受け箱の URL は次で表示します（変わらないのでブックマークできます）。
 
 ```bash
 python3 ~/.agents/skills/visual-explain/scripts/serve.py ask-config
@@ -117,7 +118,7 @@ python3 ~/.agents/skills/visual-explain/scripts/serve.py ask-config
 | 対象の質問 | AskUserQuestion | request_user_input（既定では Plan モードでだけ使われる） | question |
 | 複数選択・プレビュー | ある | 無い | 複数選択は `multiple` である。プレビューは無い |
 | 答えの返り方 | AskUserQuestion の答えとメモ | hook がツールを拒否し、その理由の文に答えを入れて返す | plugin が `question` の実行を差し替え、`answers`（質問ごとの配列）をツールの結果にして返す |
-| 登録 | settings.json の hook | hooks.json の hook（`/hooks` で信頼する） | 設定フォルダの `plugins/visual-explain.js`（OpenCode の起動し直しが要る） |
+| 登録 | settings.json の PermissionRequest の hook（選択画面と並んで動く） | hooks.json の PreToolUse の hook（`/hooks` で信頼する。待つ間は選択画面が出ない） | 設定フォルダの `plugins/visual-explain.js`（OpenCode の起動し直しが要る） |
 | セッションの開始時 | 受け箱の URL をターミナルに出す | 何も出さない（モデルの文脈に入るため） | 何も出さない（hook が無いため。受け箱の URL は `ask-config` で見る） |
 
 質問ごとに、質問したセッションを分岐したエージェントが、選ぶための図入りの資料を作ります（数分。`ask-config --build never` で作らない）。資料には、選択肢の比較の前に、なぜその質問が出たか（何の作業の途中か・聞く理由・決まっていること・判断の軸・答えた後）を書きます。複数のセッション・アカウント・エージェントから質問が来ても、答えはそれぞれのセッションに戻ります。設定とデータは `~/.local/state/visual-explain/` に置きます。

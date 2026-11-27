@@ -39,7 +39,7 @@
   var list = el('ol', { class: 've-qa-inbox-list', 'aria-live': 'polite' });
   var main = el('main', { class: 've-qa ve-qa-inbox' }, [
     el('h1', { text: 'エージェントからの質問' }),
-    el('p', { text: 'Claude Code（AskUserQuestion）や Codex（request_user_input）が質問すると、その資料をここから開きます（開いた時点で答えを待っている質問も開きます）。資料の右の欄で選んで送ると、答えがそのセッションの作業に戻ります。このページを一度開くと、それ以降の質問は、ターミナルではなくページで答えを待ちます（ターミナルには「running PreToolUse hooks…」とだけ出ます）。' }),
+    el('p', { text: 'Claude Code（AskUserQuestion）や Codex（request_user_input）が質問すると、その資料をここから開きます（開いた時点で答えを待っている質問も開きます）。資料の右の欄で選んで送ると、答えがそのセッションの作業に戻ります。このページを一度開くと、それ以降の質問はページで答えを待ちます（Claude Code はターミナルの選択画面でも答えられ、先に答えた方が使われます。Codex のターミナルには「running PreToolUse hooks…」とだけ出ます）。' }),
     el('p', {}, [autoBox, el('label', { for: 've-qa-inbox-auto', text: ' 質問が来たら自動で開く' })]),
     alerts, status, list
   ]);
