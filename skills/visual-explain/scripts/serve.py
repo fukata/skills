@@ -1340,9 +1340,12 @@ class App:
         # どのセッションの質問か見分けられるよう、ブランチと、セッションの最初の依頼を添える
         session = {"id": sid[:8], "branch": git_branch(cwd), "prompt": agent.session_info(sid, config_dir or agent.default_home(),
                                                                                      body.get("transcript_path"))["prompt"]}
+        # terminal_dialog: 待つ間もターミナルに選択画面が出ている（Claude Code の PermissionRequest の hook）。
+        # ページには、ターミナルでも答えられると出す
         write_json(m.ask_path, {"id": name, "status": "waiting", "agent": agent.key, "questions": questions, "created_at": now(),
                                 "expires_at": now(wait), "cwd": cwd, "session": session, "answers": None,
-                                "annotations": None, "closed_at": None, "build": build})
+                                "annotations": None, "closed_at": None, "build": build,
+                                "terminal_dialog": body.get("terminal_dialog") is True})
         with self.lock:
             self.waiters[m.dir] = time.time()
         if self.owns(m) and build:
@@ -1386,6 +1389,7 @@ class App:
         view["where"] = os.path.basename(str(ask.get("cwd") or "").rstrip("/"))
         view["agent"] = ask.get("agent") if ask.get("agent") in self.agents else "claude"
         view["agent_name"] = self.agents[view["agent"]].label
+        view["terminal_dialog"] = ask.get("terminal_dialog") is True
         view["waiting"] = self.waiter_alive(m)
         view["viewers"] = self.viewers
         if view["status"] == "waiting" and passed(ask.get("expires_at")):
@@ -2711,7 +2715,7 @@ def ask_config_main(args):
             conf["bind"], "Tailscale" if conf["bind"] != "127.0.0.1" else "Tailscale が無いので、このマシンだけ")))
         if tailscale_https_name():
             print("デスクトップ通知: --https on で、受け箱を Tailscale の HTTPS で開けるようにすると使える")
-    print("待つ時間: %d 分（過ぎたら、ターミナルにいつもの選択画面が出る）" % (int(conf["wait"]) // 60))
+    print("待つ時間: %d 分（過ぎたら、ターミナルの選択画面で答える）" % (int(conf["wait"]) // 60))
     print("資料: %s" % ("質問ごとに図入りの資料を作る" if conf["build"] == "always" else "作らない（選択肢のページだけ）"))
     foreign = not running and conf["mode"] != "off" and ask_probe(conf) == "foreign"
     print("配信サーバー: %s" % ("動いている（%s）" % ask_base_url(conf) if running else

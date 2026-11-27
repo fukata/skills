@@ -24,15 +24,16 @@ plug() { echo "$T/.config/opencode/plugins/visual-explain.js"; }
 echo "== setup.sh"
 fresh
 out="$(run setup.sh 2>&1)"
-check "Claude の SessionStart と PreToolUse を足す" "[ \$(count '$T/.claude/settings.json' ask_hook.py SessionStart) = 1 ] && [ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 1 ]"
-check "Claude の matcher は AskUserQuestion" "python3 -c 'import json; d=json.load(open(\"$T/.claude/settings.json\")); assert any(g.get(\"matcher\")==\"AskUserQuestion\" and \"--agent claude\" in g[\"hooks\"][0][\"command\"] and g[\"hooks\"][0][\"timeout\"]==7200 for g in d[\"hooks\"][\"PreToolUse\"])'"
+# Claude は PermissionRequest に登録する（ターミナルの選択画面と並んで動き、先に答えた方が使われる）
+check "Claude の SessionStart と PermissionRequest を足す" "[ \$(count '$T/.claude/settings.json' ask_hook.py SessionStart) = 1 ] && [ \$(count '$T/.claude/settings.json' ask_hook.py PermissionRequest) = 1 ] && [ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ]"
+check "Claude の matcher は AskUserQuestion" "python3 -c 'import json; d=json.load(open(\"$T/.claude/settings.json\")); assert any(g.get(\"matcher\")==\"AskUserQuestion\" and \"--agent claude\" in g[\"hooks\"][0][\"command\"] and g[\"hooks\"][0][\"timeout\"]==7200 for g in d[\"hooks\"][\"PermissionRequest\"])'"
 check "Codex の matcher は request_user_input" "python3 -c 'import json; d=json.load(open(\"$T/.codex/hooks.json\")); assert any(g.get(\"matcher\")==\"request_user_input\" and \"--agent codex\" in g[\"hooks\"][0][\"command\"] and g[\"hooks\"][0][\"statusMessage\"] for g in d[\"hooks\"][\"PreToolUse\"])'"
 check "Codex の SessionStart は --agent codex" "python3 -c 'import json; d=json.load(open(\"$T/.codex/hooks.json\")); assert any(\"--agent codex --session-start\" in h[\"command\"] for g in d[\"hooks\"][\"SessionStart\"] for h in g[\"hooks\"])'"
 check "既存の設定を残す" "grep -q 'echo keep' '$T/.claude/settings.json' && grep -q 'Bash(ls:\*)' '$T/.claude/settings.json' && grep -q 'echo other' '$T/.codex/hooks.json'"
 check "呼び出されたパスをそのまま書く" "grep -q '$SKILL/scripts/ask_hook.py' '$T/.codex/hooks.json'"
 check "Codex の /hooks での信頼を案内する" "grep -q '/hooks' <<<\"\$out\""
 run setup.sh >/dev/null 2>&1
-check "2 回実行しても重複しない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 1 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
+check "2 回実行しても重複しない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PermissionRequest) = 1 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
 check "OpenCode の plugins に登録ファイルを 1 つ置く" "[ \$(grep -c 'export { default } from' \"\$(plug)\") = 1 ] && grep -q \"$SKILL/opencode/plugin.js\" \"\$(plug)\""
 check "登録ファイルはスキルの plugin を読み込むだけ" "[ \$(wc -l < \"\$(plug)\") -le 3 ]"
 check "OpenCode を起動し直す案内をする" "grep -q '起動し直すと効く' <<<\"\$out\""
@@ -47,7 +48,7 @@ run setup.sh >/dev/null 2>&1
 check "2 回実行しても 1 つだけ（置き直す）" "[ \$(ls '$T/.config/opencode/plugins' | wc -l) = 2 ] && [ \$(grep -c 'export { default } from' \"\$(plug)\") = 1 ]"
 fresh
 run setup.sh --opencode >/dev/null 2>&1
-check "--opencode なら Claude と Codex には足さない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 0 ] && [ -e \"\$(plug)\" ]"
+check "--opencode なら Claude と Codex には足さない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PermissionRequest) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 0 ] && [ -e \"\$(plug)\" ]"
 fresh
 run setup.sh --codex >/dev/null 2>&1
 check "--codex なら OpenCode には置かない" "[ ! -e \"\$(plug)\" ]"
@@ -76,7 +77,7 @@ run setup.sh >/dev/null 2>&1
 check "再実行しても同じ位置で置き換える" "python3 -c 'import json; g=json.load(open(\"$T/.codex/hooks.json\"))[\"hooks\"][\"PreToolUse\"]; assert len(g)==2 and \"ask_hook.py\" in g[0][\"hooks\"][0][\"command\"] and g[1][\"hooks\"][0][\"command\"]==\"echo later\"'"
 ln -s "$SKILL" "$ROOT/link-$$"
 env -u CLAUDE_CONFIG_DIR -u CODEX_HOME HOME="$T" bash "$ROOT/link-$$/setup.sh" >/dev/null 2>&1
-check "別のパス（リンク）から実行しても二重にしない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 1 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
+check "別のパス（リンク）から実行しても二重にしない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PermissionRequest) = 1 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
 fresh
 mv "$T/.claude/settings.json" "$T/dotfiles-settings.json"; ln -s "$T/dotfiles-settings.json" "$T/.claude/settings.json"; chmod 600 "$T/dotfiles-settings.json"
 run setup.sh >/dev/null 2>&1
@@ -93,7 +94,7 @@ run setup.sh >/dev/null 2>&1
 check "~/.codex が無ければ Codex は登録しない" "[ ! -e '$T/.codex/hooks.json' ]"
 fresh
 run setup.sh --codex >/dev/null 2>&1
-check "--codex なら Claude には足さない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
+check "--codex なら Claude には足さない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PermissionRequest) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py PreToolUse) = 1 ]"
 fresh
 printf '{"enabledPlugins":{"visual-explain@some-market":true}}\n' > "$T/.claude/settings.json"
 out="$(run setup.sh 2>&1)"; code=$?
@@ -101,16 +102,29 @@ check "plugin 版の visual-explain が有効なら止める" "[ $code -ne 0 ] &
 fresh
 printf '{"enabledPlugins":{"visual-explain@some-market":false,"other@x":true}}\n' > "$T/.claude/settings.json"
 run setup.sh >/dev/null 2>&1
-check "無効の plugin 版・別の plugin では止めない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 1 ]"
+check "無効の plugin 版・別の plugin では止めない" "[ \$(count '$T/.claude/settings.json' ask_hook.py PermissionRequest) = 1 ]"
 fresh
 out="$(run setup.sh --bogus 2>&1)"; code=$?
 check "知らない引数は使い方の誤り" "[ $code -eq 2 ]"
+
+echo "== 前の版の登録（Claude の PreToolUse）"
+# 前の版は PreToolUse に登録していた。hook が待つ間はターミナルの選択画面が出ず、Orca の chat UI の答え（キー入力）が入力欄に入った
+old_claude() {
+  printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo bash-guard"}]},{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":"python3 -I /old/place/visual-explain/scripts/ask_hook.py --agent claude","timeout":7200}]}]}}\n' > "$T/.claude/settings.json"
+}
+fresh; old_claude
+run setup.sh --claude >/dev/null 2>&1
+check "PreToolUse の登録を外して PermissionRequest に移す" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ] && [ \$(count '$T/.claude/settings.json' ask_hook.py PermissionRequest) = 1 ]"
+check "PreToolUse のほかの hook は残す" "grep -q 'echo bash-guard' '$T/.claude/settings.json'"
+fresh; old_claude
+run teardown.sh --claude >/dev/null 2>&1
+check "teardown は前の版の PreToolUse の登録も外す" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ] && grep -q 'echo bash-guard' '$T/.claude/settings.json'"
 
 echo "== teardown.sh"
 fresh
 run setup.sh >/dev/null 2>&1
 run teardown.sh >/dev/null 2>&1
-check "足した項目だけを外す" "[ \$(count '$T/.claude/settings.json' ask_hook.py PreToolUse) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py SessionStart) = 0 ] && grep -q 'echo keep' '$T/.claude/settings.json' && grep -q 'echo other' '$T/.codex/hooks.json'"
+check "足した項目だけを外す" "[ \$(count '$T/.claude/settings.json' ask_hook.py PermissionRequest) = 0 ] && [ \$(count '$T/.codex/hooks.json' ask_hook.py SessionStart) = 0 ] && grep -q 'echo keep' '$T/.claude/settings.json' && grep -q 'echo other' '$T/.codex/hooks.json'"
 check "空になったイベントは消す" "python3 -c 'import json; d=json.load(open(\"$T/.codex/hooks.json\")); assert \"PreToolUse\" not in d[\"hooks\"]'"
 check "OpenCode の登録ファイルを外す" "[ ! -e '$T/.config/opencode/plugins/visual-explain.js' ]"
 fresh

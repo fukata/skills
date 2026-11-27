@@ -4,10 +4,14 @@
   python3 -I ask_hook.py [--agent claude|codex] [--session-start]   （--agent の既定は claude。Claude Code と Codex のフック）
   python3 -I ask_hook.py --agent opencode   （標準入力から JSON で質問を受け取り、答えを JSON で返す）
 
-  質問のツールの直前（Claude Code は AskUserQuestion、Codex は request_user_input）: 質問を常駐の
-    配信サーバーに登録して資料のページに出し、ページで選ばれた答えを元のセッションに返す。ターミナルの選択画面は出ない。
-    Claude Code には AskUserQuestion の答え（updatedInput）として、Codex にはツールの結果を差し替える手段が無いので、
-    拒否（deny）の理由の文として答えを届ける。
+  質問のツール（Claude Code は AskUserQuestion、Codex は request_user_input）: 質問を常駐の配信サーバーに登録して
+    資料のページに出し、ページで選ばれた答えを元のセッションに返す。
+    Claude Code では PermissionRequest の hook として動く。hook はターミナルの選択画面と並んで動き、先に答えた方が使われる
+    （ターミナルで答えると、Claude Code が hook を止める）。Orca の chat UI は答えを番号のキー入力でターミナルに送るので、
+    選択画面が開いている必要がある。答えは AskUserQuestion の答え（decision の updatedInput）として返す。
+    前の版の登録（PreToolUse）から呼ばれたときは、PreToolUse の形で返す（待つ間、選択画面は出ない）。
+    Codex では PreToolUse の hook として、ツールの直前に動く（待つ間、選択画面は出ない）。ツールの結果を差し替える手段が
+    無いので、拒否（deny）の理由の文として答えを届ける。
     OpenCode では plugin（<スキル>/opencode/plugin.js）が question ツールの実行を差し替えてこのフックを呼ぶ。
     標準入力に {"session_id", "cwd", "questions"} を渡すと、{"answers": [[...]]} か、ページに出せなかったことを
     表す {"fallback": true} を返す（true なら plugin がいつもどおりターミナルの質問画面を出す）。
@@ -16,7 +20,7 @@
     設定は serve.py ask-config で変える。
   セッションの開始（--session-start）: 使う設定なら、常駐の配信サーバーが動いていなければ起動する（待たない）。
 
-何も返さずに終えると、いつもどおりターミナルに選択画面が出る（使わない設定・ページを見ている人がいない・登録できない・
+何も返さずに終えると、ターミナルの選択画面で答える（使わない設定・ページを見ている人がいない・登録できない・
 「ターミナルで答える」・待つ時間切れ）。待つ間は 1 秒おきに配信サーバーに問い合わせ、配信サーバーはその間を
 「エージェントが待っている」とみなす（フックが止められたら、ページから答えを送れなくなる）。
 """
@@ -126,7 +130,7 @@ def session_start(agent):
         # 質問をページで待つ人にだけ、受け箱の URL をターミナルに出す（待っている間はフックから何も出せないため。
         # systemMessage は開発者にだけ見え、会話の文脈には入らない）
         inbox = "%s/__qa/inbox?k=%s" % (conf["public_url"], conf["token"])
-        text = ("visual-explain: AskUserQuestion の質問は資料のページで答えを待ちます。受け箱: %s" % inbox if running else
+        text = ("visual-explain: AskUserQuestion の質問は資料のページでも答えられます。受け箱: %s" % inbox if running else
                 "visual-explain: 受け箱の配信サーバーを起動できませんでした（ask-config で確かめる）。質問はターミナルで答えます")
         print(json.dumps({"systemMessage": text}))
     return 0
@@ -308,6 +312,8 @@ def main():
     questions = codex_questions(inp) if agent == "codex" else inp.get("questions")
     if questions is None:
         return 0
+    # PermissionRequest の hook なら、待つ間もターミナルに選択画面が出ている（前の版の登録の PreToolUse では出ない）
+    dialog = agent == "claude" and data.get("hook_event_name") == "PermissionRequest"
     sys.path.insert(0, HERE)
     import serve
 
@@ -332,16 +338,19 @@ def main():
         updated = dict(inp, answers=answers)
         if notes:
             updated["annotations"] = notes
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "allow",
-            "permissionDecisionReason": "資料のページで答えた", "updatedInput": updated},
-            # 後から資料を見返せるよう、ターミナルに資料の URL を出す（開発者にだけ見え、会話の文脈には入らない）
-            "systemMessage": "visual-explain: 資料のページで答えました: %s" % url}))
+        if dialog:
+            spec = {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedInput": updated}}
+        else:
+            spec = {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                    "permissionDecisionReason": "資料のページで答えた", "updatedInput": updated}
+        # 後から資料を見返せるよう、ターミナルに資料の URL を出す（開発者にだけ見え、会話の文脈には入らない）
+        print(json.dumps({"hookSpecificOutput": spec, "systemMessage": "visual-explain: 資料のページで答えました: %s" % url}))
         return 0
 
     page_ask(home, conf, mode, questions,
              {"session_id": data.get("session_id"), "cwd": data.get("cwd"), "agent": agent,
-              "transcript_path": data.get("transcript_path"), "config_dir": os.environ.get(ACCOUNT_ENV[agent])},
+              "transcript_path": data.get("transcript_path"), "config_dir": os.environ.get(ACCOUNT_ENV[agent]),
+              "terminal_dialog": dialog},
              answered, log)
     return 0
 

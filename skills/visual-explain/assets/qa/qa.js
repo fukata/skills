@@ -1033,7 +1033,9 @@
       el('a', { href: API + 'inbox', text: '受け箱' })]));
     if (session.prompt) askBox.appendChild(el('p', { class: 've-qa-meta ve-qa-ask-session', text: 'セッションの最初の依頼: 「' + session.prompt + '」' }));
     if (state === 'waiting') {
-      askBox.appendChild(el('p', { class: 've-qa-note-inline', text: '選んで送ると、答えが ' + agentName(a) + ' の作業に戻ります（ターミナルの選択画面は出ません）。' }));
+      // terminal_dialog: 待つ間もターミナルに選択画面が出ている（Claude Code の PermissionRequest の hook）。先に答えた方が使われる
+      askBox.appendChild(el('p', { class: 've-qa-note-inline', text: '選んで送ると、答えが ' + agentName(a) + ' の作業に戻ります' +
+        (a.terminal_dialog ? '（ターミナルの選択画面でも答えられます。先に答えた方が使われます）。' : '（ターミナルの選択画面は出ません）。') }));
       askBox.appendChild(askForm(a));
       if (!askSeen[a.id]) {
         askSeen[a.id] = true;
@@ -1045,7 +1047,8 @@
       return;
     }
     var text = { answered: '答えを送りました。' + agentName(a) + ' の作業が続いています。',
-      terminal: 'ターミナルで答えることにしました。ターミナルに選択画面が出ています。',
+      terminal: a.terminal_dialog ? 'ターミナルの選択画面で答えます（ターミナルで答えたか、「ターミナルで答える」を選びました）。ページからは送れません。'
+        : 'ターミナルで答えることにしました。ターミナルに選択画面が出ています。',
       expired: '待つ時間を過ぎました。ターミナルで答えてください。',
       gone: agentName(a) + ' がもう答えを待っていません（ターミナルで中断された可能性があります）。ターミナルで答えてください。' }[state];
     askBox.appendChild(el('p', { class: state === 'answered' ? 've-qa-doc' : 've-qa-doc ve-qa-doc-warn', text: text || '' }));

@@ -6,6 +6,11 @@
 既存の項目は変えない。visual-explain の scripts/ask_hook.py を呼ぶ項目だけを扱う（どのパスに入れたものでも同じとみなし、
 何度足しても 1 つ）。既にあれば同じ位置で置き換える（Codex は hook の信頼をグループの番号で記録するため）。
 ファイルがシンボリックリンクならリンク先を書き換え、ファイルの権限を保つ。
+
+質問の hook を登録するイベントは、Claude Code は PermissionRequest、Codex は PreToolUse。Claude Code の PermissionRequest の
+hook は、ターミナルの選択画面と並んで動き、先に答えた方が使われる（負けた hook は止められる）。前の版は Claude Code でも
+PreToolUse に登録していたが、hook が待つ間は選択画面が出ず、Orca の chat UI が送る答え（番号のキー入力）が入力欄に入って
+次のメッセージとして積まれていた。足すときも外すときも、前の版の PreToolUse の登録を外す。
 """
 import argparse
 import json
@@ -13,16 +18,19 @@ import os
 import shlex
 import sys
 
-STATUS = "資料のページで答えを待っています（受け箱から開けます）"
+STATUS = {"claude": "ターミナルの選択画面でも、資料のページ（受け箱から開けます）でも答えられます",
+          "codex": "資料のページで答えを待っています（受け箱から開けます）"}
 MATCHER = {"claude": "AskUserQuestion", "codex": "request_user_input"}
+ASK_EVENT = {"claude": "PermissionRequest", "codex": "PreToolUse"}
+LEGACY_EVENTS = {"claude": ("PreToolUse",), "codex": ()}  # 前の版が質問の hook を登録していたイベント
 MARK = "/visual-explain/scripts/ask_hook.py"
 
 
 def entries(skill, agent):
     hook = "python3 -I %s --agent %s" % (shlex.quote(os.path.join(skill, "scripts", "ask_hook.py")), agent)
     return {"SessionStart": {"hooks": [{"type": "command", "command": hook + " --session-start", "timeout": 30}]},
-            "PreToolUse": {"matcher": MATCHER[agent],
-                           "hooks": [{"type": "command", "command": hook, "timeout": 7200, "statusMessage": STATUS}]}}
+            ASK_EVENT[agent]: {"matcher": MATCHER[agent],
+                               "hooks": [{"type": "command", "command": hook, "timeout": 7200, "statusMessage": STATUS[agent]}]}}
 
 
 def ours(group):
@@ -53,12 +61,16 @@ def main():
     except ValueError as e:
         return fail("%s を JSON として読めないので、書き換えなかった（%s）。直してから実行し直す" % (args.file, e))
     hooks = data.setdefault("hooks", {}) if isinstance(data, dict) else None
-    if not isinstance(hooks, dict) or any(not isinstance(hooks.get(e, []), list) for e in ("SessionStart", "PreToolUse")):
+    wanted = entries(args.skill, args.agent)
+    legacy = {e: None for e in LEGACY_EVENTS[args.agent] if e not in wanted}  # 外すだけ
+    if not isinstance(hooks, dict) or any(not isinstance(hooks.get(e, []), list) for e in list(wanted) + list(legacy)):
         return fail("%s の hooks の形が想定と違うので、書き換えなかった" % args.file)
-    for event, entry in entries(args.skill, args.agent).items():
+    for event, entry in list(wanted.items()) + list(legacy.items()):
         groups = list(hooks.get(event) or [])
         mine = [i for i, g in enumerate(groups) if ours(g)]
-        if args.action == "add" and mine:
+        if entry is None:
+            groups = [g for g in groups if not ours(g)]
+        elif args.action == "add" and mine:
             groups[mine[0]] = entry  # 同じ位置で置き換え、重複していた分は外す
             groups = [g for i, g in enumerate(groups) if i not in mine[1:]]
         else:

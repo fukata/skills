@@ -57,10 +57,11 @@ bash ~/.agents/skills/visual-explain/setup.sh     # 対象は自動判定。--cl
 - 呼び出されたパス（`<skill>`）をそのまま hook のコマンドに書く（orca-account-failover と同じ）。
 - Claude Code（`~/.claude` か `CLAUDE_CONFIG_DIR` があるとき）: `settings.json` に次を足す。
   - `SessionStart`: `python3 -I <skill>/scripts/ask_hook.py --agent claude --session-start`（timeout 30）
-  - `PreToolUse`（matcher `AskUserQuestion`）: `python3 -I <skill>/scripts/ask_hook.py --agent claude`（timeout 7200、statusMessage「資料のページで答えを待っています（受け箱から開けます）」）
+  - `PermissionRequest`（matcher `AskUserQuestion`）: `python3 -I <skill>/scripts/ask_hook.py --agent claude`（timeout 7200、statusMessage「ターミナルの選択画面でも、資料のページ（受け箱から開けます）でも答えられます」）
+  - 2026-11-27 に `PreToolUse` から移した。`PreToolUse` の hook が待つ間はターミナルの選択画面が出ず、Orca の chat UI の質問カードの答え（番号のキー入力）が入力欄に入り、次のメッセージとして積まれて進まなかった。`PermissionRequest` の hook は選択画面と並んで動き、先に答えた方が使われる（負けた hook は Claude Code が SIGTERM で止める。Claude Code 2.1.332 で、ターミナル・`--dangerously-skip-permissions`・stream-json の起動で確かめた）。`setup.sh` は前の版の `PreToolUse` の登録を外す。
 - Codex（`~/.codex` か `CODEX_HOME` があるとき）: `hooks.json` に次を足す。
   - `SessionStart`: `python3 -I <skill>/scripts/ask_hook.py --agent codex --session-start`（timeout 30）
-  - `PreToolUse`（matcher `request_user_input`）: `python3 -I <skill>/scripts/ask_hook.py --agent codex`（timeout 7200、同じ statusMessage）
+  - `PreToolUse`（matcher `request_user_input`）: `python3 -I <skill>/scripts/ask_hook.py --agent codex`（timeout 7200、statusMessage「資料のページで答えを待っています（受け箱から開けます）」）
   - Codex は信頼していない hook を黙って無視するので、最後に「Codex を開いて `/hooks` でこの hook を信頼する」と案内する。`config.toml` の `trusted_hash` は書かない。hook のコマンド文字列は固定にし、スキルを更新しても信頼し直しにならないようにする。
 - 何度実行しても重複しない（同じコマンドの項目があれば置き換える）。`jq` を使わず python3 で JSON を読み書きする（スキル全体の依存を python3 に揃える）。
 - plugin 版の visual-explain（`visual-explain@<marketplace>`）が `settings.json` の `enabledPlugins` で有効なら、外すよう案内して止める（受け箱の hook が二重に動くため）。
