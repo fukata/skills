@@ -59,7 +59,7 @@ SKILL_MD = os.path.join(SKILL_DIR, "SKILL.md")
 TEMPLATE = os.path.join(SKILL_DIR, "assets", "explanation.html")
 BUILD_PROMPT = os.path.join(SKILL_DIR, "assets", "ask", "build-prompt.md")
 SERVE_PY = os.path.abspath(__file__)
-VERSION = "1.5.0"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
+VERSION = "1.5.1"  # 常駐の配信サーバーはこれより古い版なら起動し直す。serve.py・ask_hook.py・assets を変えたら上げる
 ASK_CHILD_ENV = "VISUAL_EXPLAIN_ASK_CHILD"  # 配信サーバーが動かす claude -p の印。フックはこの中の質問を扱わない
 
 QA_DIR = "qa"                 # 資料フォルダの中で質問と回答を置くフォルダ。静的配信では返さない
